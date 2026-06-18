@@ -376,10 +376,15 @@ jobs:
           Add-Content $env:GITHUB_STEP_SUMMARY ""
           Add-Content $env:GITHUB_STEP_SUMMARY "![recording.gif]($env:GIF_URL)"
 
-      - name: Installer log
+      - name: Bootstrap Installer log
         shell: pwsh
         run: |
           Get-Content "$env:HERMES_HOME\logs\bootstrap-installer.log"
+
+      - name: Bootstrap log
+        shell: pwsh
+        run: |
+          Get-Content "$env:HERMES_HOME\logs\bootstrap.log"
 
       - name: Autohotkey log
         shell: pwsh
