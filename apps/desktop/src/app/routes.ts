@@ -20,6 +20,11 @@ export type AppView =
   | 'chat'
   | 'command-center'
   | 'cron'
+  // A contributed (plugin) full page at its own route — NOT chat. Without this
+  // distinction contributed paths fell through appViewForPath's 'chat' default,
+  // so the sidebar kept a session highlighted and the titlebar kept the
+  // session-title dropdown while a plugin page was showing.
+  | 'extension'
   | 'messaging'
   | 'profiles'
   | 'settings'
@@ -142,6 +147,10 @@ export function sessionRoute(sessionId: string): string {
 export function appViewForPath(pathname: string): AppView {
   if (isNewChatRoute(pathname) || routeSessionId(pathname)) {
     return 'chat'
+  }
+
+  if (isContributedPath(pathname)) {
+    return 'extension'
   }
 
   return APP_VIEW_BY_PATH.get(pathname) ?? 'chat'

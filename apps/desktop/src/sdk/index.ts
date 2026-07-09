@@ -161,6 +161,9 @@ export { ErrorState } from '@/components/ui/error-state'
 export { GlyphSpinner } from '@/components/ui/glyph-spinner'
 export { Input } from '@/components/ui/input'
 export { Kbd, KbdGroup } from '@/components/ui/kbd'
+/** The app's canonical loader (animated curves; `lemniscate-bloom` for long
+ *  page loads) — the same one every core page uses. */
+export { Loader, type LoaderType } from '@/components/ui/loader'
 export { LogView } from '@/components/ui/log-view'
 export { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 export { ScrollArea } from '@/components/ui/scroll-area'
@@ -174,10 +177,16 @@ export { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 export { Textarea } from '@/components/ui/textarea'
 export { Tip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 export type { GatewayEventListener } from '@/contrib/events'
+export type { HermesPlugin, PluginContext, PluginContribution, PluginRestOptions, PluginStorage } from '@/contrib/plugin'
 
 // -- contracts ----------------------------------------------------------------
 
-export type { HermesPlugin, PluginContext, PluginContribution, PluginRestOptions, PluginStorage } from '@/contrib/plugin'
+/** Mount-scoped contribution: while the rendering component is mounted, its
+ *  children render in the target area's slot; unmount disposes it. Use for
+ *  page-owned chrome (a page's titlebar control leaves with the page) —
+ *  `ctx.register` stays the door for permanent contributions. Namespace the
+ *  id with your plugin slug (`kanban:board-switcher`). */
+export { Contribute, type ContributeProps } from '@/contrib/react/contribute'
 export type { Contribution } from '@/contrib/types'
 /** Localized copy — plugins reuse the app's strings (and stay translatable). */
 export { useI18n } from '@/i18n'
@@ -185,6 +194,14 @@ export { triggerHaptic as haptic } from '@/lib/haptics'
 /** The app's lucide icon set (RefreshCw, LayoutDashboard, Activity, …). */
 export * as icons from '@/lib/icons'
 export { type KeybindContribution, KEYBINDS_AREA } from '@/lib/keybinds/actions'
+/** The app's deterministic identity color for a name (profiles, assignees,
+ *  authors) + its translucent tag fill — so plugin-rendered identities read
+ *  the same hue as everywhere else. */
+export { profileColor, profileColorSoft } from '@/lib/profile-color'
+/** The shared client itself, for invalidation OUTSIDE React (e.g. a
+ *  `ctx.socket` frame invalidating a query). Inside components keep using
+ *  `useQueryClient`. */
+export { queryClient } from '@/lib/query-client'
 
 export const PANES_AREA = 'panes'
 export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' } as const
@@ -194,11 +211,18 @@ export const TITLEBAR_AREAS = { center: 'titleBar.center', left: 'titleBar.left'
  *  setup.runtime_check, reconciled) — pass `host.request`. Don't hand-roll
  *  readiness from raw RPC shapes. */
 export { evaluateRuntimeReadiness, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
+/** Canonical time formatting — every timestamp/age string in the app comes
+ *  from these (localized `Intl` under the hood). Don't hand-roll "Xm ago". */
+export { coarseElapsed, fmtDateTime, fmtDayTime, relativeTime } from '@/lib/time'
 export { cn } from '@/lib/utils'
 export { THEMES_AREA } from '@/themes/user-themes'
 export type { RpcEvent, StatusResponse } from '@/types/hermes'
 /** Subscribe a component to a `host.state` atom. */
 export { useStore as useValue } from '@nanostores/react'
+/** The app's data-fetching layer. Plugins share the ONE QueryClient mounted at
+ *  the app root, so their queries cache, dedupe, poll (`refetchInterval`), and
+ *  invalidate exactly like core screens — no hand-rolled atoms or polls. */
+export { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 /** Plugin-local reactive state (share between a trigger and its panel, poll
  *  loops, cross-component signals) — the same primitive `host.state` uses. */
 export { atom, computed } from 'nanostores'
