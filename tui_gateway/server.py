@@ -5082,15 +5082,13 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any)
     a turn is in flight, instead of rejecting it with ``session busy``.
 
     The old rejection forced clients into a deadline-bounded busy-retry that
-    silently dropped the send when turn teardown outlived the deadline (e.g. a
-    slow, non-interruptible tool like ``web_search`` running when the user hits
-    stop). The message is instead queued to run as the next turn — and, for the
-    default ``interrupt`` policy, the live turn is interrupted so it winds down
-    promptly. Drained in ``run``'s tail (see ``_run_prompt_submit``).
+    silently dropped the send when turn teardown outlived the deadline. The
+    default policy now redirects a capable core agent in place; older agents
+    retain the proven interrupt-and-queue path drained from ``run``'s tail.
 
-    Modes: ``interrupt`` (default) → interrupt + queue; ``queue`` → queue
-    without interrupting; ``steer`` → inject into the live turn if accepted,
-    else queue.
+    Modes: ``interrupt`` (default) → redirect the live turn, falling back to
+    hard interrupt + queue for older agents; ``queue`` → queue without
+    interrupting; ``steer`` → inject after the current atomic action.
     """
     mode = _load_busy_input_mode()
     agent = session.get("agent")
@@ -5101,6 +5099,18 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any)
                 return _ok(rid, {"status": "steered"})
         except Exception:
             pass  # fall through to queue
+    if (
+        mode == "interrupt"
+        and agent is not None
+        and getattr(agent, "_supports_active_turn_redirect", False) is True
+        and hasattr(agent, "redirect")
+    ):
+        try:
+            if agent.redirect(text):
+                session["last_active"] = time.time()
+                return _ok(rid, {"status": "redirected"})
+        except Exception:
+            pass  # preserve the proven interrupt + queue fallback below
     if mode != "queue" and agent is not None and hasattr(agent, "interrupt"):
         try:
             agent.interrupt()
@@ -8403,6 +8413,32 @@ def _(rid, params: dict) -> dict:
     except Exception as exc:
         return _err(rid, 5000, f"steer failed: {exc}")
     return _ok(rid, {"status": "queued" if accepted else "rejected", "text": text})
+
+
+@method("session.redirect")
+def _(rid, params: dict) -> dict:
+    """Redirect the active model turn while preserving valid work/context."""
+    text = (params.get("text") or "").strip()
+    if not text:
+        return _err(rid, 4002, "text is required")
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    agent = session.get("agent")
+    if (
+        agent is None
+        or getattr(agent, "_supports_active_turn_redirect", False) is not True
+        or not hasattr(agent, "redirect")
+    ):
+        return _err(rid, 4010, "agent does not support active-turn redirect")
+    try:
+        accepted = agent.redirect(text)
+    except Exception as exc:
+        return _err(rid, 5000, f"redirect failed: {exc}")
+    return _ok(
+        rid,
+        {"status": "redirected" if accepted else "rejected", "text": text},
+    )
 
 
 @method("terminal.resize")

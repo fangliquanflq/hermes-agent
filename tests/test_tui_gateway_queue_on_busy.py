@@ -1,12 +1,12 @@
-"""A prompt that lands mid-turn is interrupted + queued, never dropped.
+"""A prompt that lands mid-turn is redirected or queued, never dropped.
 
 Before this, ``prompt.submit`` on a running session returned ``session busy``,
 forcing clients into a deadline-bounded busy-retry. When turn teardown outlived
 the deadline — e.g. a slow, non-interruptible tool (``web_search``) still
 running when the user hit stop — the resubmitted message was silently dropped
 ("it just doesn't listen"). The gateway now applies the ``busy_input_mode``
-policy: interrupt the live turn (default) and queue the message to run as the
-next turn, drained in ``run``'s tail.
+policy: redirect the live turn by default, with the legacy interrupt + queue
+path retained as a compatibility fallback.
 """
 
 import threading
@@ -48,7 +48,26 @@ def test_enqueue_merges_second_arrival_losslessly():
 
 # ── _handle_busy_submit (policy) ───────────────────────────────────────────
 
-def test_busy_interrupt_mode_interrupts_and_queues(monkeypatch):
+def test_busy_interrupt_mode_redirects_active_turn(monkeypatch):
+    monkeypatch.setattr(server, "_load_busy_input_mode", lambda: "interrupt")
+    seen = []
+    agent = types.SimpleNamespace(
+        _supports_active_turn_redirect=True,
+        redirect=lambda text: seen.append(text) or True,
+        interrupt=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("redirect must not hard-interrupt")
+        ),
+    )
+    session = _session(agent=agent)
+
+    resp = server._handle_busy_submit("r1", "sid", session, "redirect", "ws-1")
+
+    assert resp["result"]["status"] == "redirected"
+    assert seen == ["redirect"]
+    assert session.get("queued_prompt") is None
+
+
+def test_busy_interrupt_mode_falls_back_for_legacy_agent(monkeypatch):
     monkeypatch.setattr(server, "_load_busy_input_mode", lambda: "interrupt")
     calls = {"interrupt": 0}
     agent = types.SimpleNamespace(interrupt=lambda *a, **k: calls.__setitem__("interrupt", calls["interrupt"] + 1))

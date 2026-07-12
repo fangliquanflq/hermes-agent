@@ -618,26 +618,35 @@ describe('usePromptActions steerPrompt', () => {
     vi.restoreAllMocks()
   })
 
-  it('injects the trimmed text via session.steer and reports acceptance on a queued status', async () => {
-    const requestGateway = vi.fn(async () => ({ status: 'queued' }) as never)
+  it('redirects the live turn with trimmed correction text', async () => {
+    const requestGateway = vi.fn(async () => ({ status: 'redirected' }) as never)
 
     let handle: HarnessHandle | null = null
+    const capturedStates: Record<string, unknown>[] = []
     render(
-      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={state => capturedStates.push(state)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
     )
 
     const accepted = await handle!.steerPrompt('  nudge the run  ')
 
     expect(accepted).toBe(true)
-    // Steer never starts a turn — it rides the live run via session.steer only.
-    expect(requestGateway).toHaveBeenCalledWith('session.steer', {
+    expect(requestGateway).toHaveBeenCalledWith('session.redirect', {
       session_id: RUNTIME_SESSION_ID,
       text: 'nudge the run'
     })
     expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything())
+    expect((capturedStates.at(-1)?.messages as unknown[]).at(-1)).toMatchObject({
+      role: 'user',
+      parts: [{ type: 'text', text: 'nudge the run' }]
+    })
   })
 
-  it('reports rejection (so the caller queues) when the gateway has no live tool window', async () => {
+  it('reports rejection so the caller queues when the turn already ended', async () => {
     const requestGateway = vi.fn(async () => ({ status: 'rejected' }) as never)
 
     let handle: HarnessHandle | null = null
@@ -648,9 +657,9 @@ describe('usePromptActions steerPrompt', () => {
     expect(await handle!.steerPrompt('too late')).toBe(false)
   })
 
-  it('reports rejection (never throws) when the steer RPC errors', async () => {
+  it('reports rejection without throwing when the redirect RPC errors', async () => {
     const requestGateway = vi.fn(async () => {
-      throw new Error('agent does not support steer')
+      throw new Error('agent does not support redirect')
     })
 
     let handle: HarnessHandle | null = null
@@ -662,7 +671,7 @@ describe('usePromptActions steerPrompt', () => {
   })
 
   it('skips the RPC entirely for empty text', async () => {
-    const requestGateway = vi.fn(async () => ({ status: 'queued' }) as never)
+    const requestGateway = vi.fn(async () => ({ status: 'redirected' }) as never)
 
     let handle: HarnessHandle | null = null
     render(
