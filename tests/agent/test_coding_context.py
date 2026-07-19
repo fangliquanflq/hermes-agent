@@ -131,10 +131,43 @@ class TestCodingSelection:
 
 # ── git/workspace probe ─────────────────────────────────────────────────────
 
+def _run_with_retained_stdin(cmd, *, env, cwd, timeout=10):
+    """Run *cmd* while keeping the stdin writer open (ACP JSON-RPC-like).
+
+    Unlike ``subprocess.run(input="")``, this does not close the pipe writer
+    until the child exits — so a nested probe that inherits stdin and reads
+    from it will hang unless it was spawned with ``stdin=DEVNULL``.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=env,
+    )
+    try:
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            stderr = proc.stderr.read() if proc.stderr else ""
+            raise AssertionError(
+                f"helper hung under retained stdin writer (stderr={stderr!r})"
+            )
+        stdout = proc.stdout.read() if proc.stdout else ""
+        stderr = proc.stderr.read() if proc.stderr else ""
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    finally:
+        if proc.stdin:
+            proc.stdin.close()
+
+
 class TestGitProbeStdioSafety:
     def test_git_probe_detaches_stdin(self, tmp_path, monkeypatch):
         """ACP stdio hosts hang if git inherits the JSON-RPC stdin pipe."""
-        _git_init(tmp_path)
         captured: dict = {}
 
         def _fake_run(*args, **kwargs):
@@ -148,26 +181,45 @@ class TestGitProbeStdioSafety:
         assert env.get("GIT_TERMINAL_PROMPT") == "0"
         assert env.get("GCM_INTERACTIVE") == "never"
 
-    def test_git_probe_returns_under_piped_stdin(self, tmp_path):
-        """Regression: piped stdin must not stall the workspace git probe."""
-        _git_init(tmp_path)
-        helper = (
+    def test_git_probe_returns_under_retained_stdin(self, tmp_path):
+        """Regression: retained open stdin must not stall the workspace git probe.
+
+        Uses a PATH-shadowing ``git`` that reads stdin. With the writer kept
+        open (ACP-like), inheriting that fd hangs; ``stdin=DEVNULL`` returns.
+        """
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_git = fake_bin / "git"
+        fake_git.write_text(
+            "#!{}\n"
             "import sys\n"
+            "# Block if stdin is an open pipe with no EOF (inherited ACP stdin).\n"
+            "sys.stdin.buffer.read(1)\n"
+            "if '--is-inside-work-tree' in sys.argv:\n"
+            "    print('true')\n"
+            "sys.exit(0)\n".format(sys.executable),
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+
+        helper = (
             "from pathlib import Path\n"
             "from agent.coding_context import _git\n"
             f"print(_git(Path({str(tmp_path)!r}), 'rev-parse', '--is-inside-work-tree'))\n"
         )
         repo_root = str(Path(__file__).resolve().parents[2])
-        proc = subprocess.run(
+        env = {
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "PYTHONPATH": repo_root,
+        }
+        proc = _run_with_retained_stdin(
             [sys.executable, "-c", helper],
-            input="",  # keep stdin as a pipe (empty)
-            capture_output=True,
-            text=True,
-            timeout=10,
+            env=env,
             cwd=repo_root,
-            env={**os.environ, "PYTHONPATH": repo_root},
+            timeout=10,
         )
-        assert proc.returncode == 0
+        assert proc.returncode == 0, proc.stderr
         assert proc.stdout.strip() == "true"
 
 

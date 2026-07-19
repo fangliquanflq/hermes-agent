@@ -117,6 +117,40 @@ class TestFindBashUnchanged:
         assert len(result) > 0
 
 
+def _run_with_retained_stdin(cmd, *, env, cwd, timeout=10):
+    """Run *cmd* while keeping the stdin writer open (ACP JSON-RPC-like).
+
+    Unlike ``subprocess.run(input="")``, this does not close the pipe writer
+    until the child exits — so a nested probe that inherits stdin and reads
+    from it will hang unless it was spawned with ``stdin=DEVNULL``.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=env,
+    )
+    try:
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            stderr = proc.stderr.read() if proc.stderr else ""
+            raise AssertionError(
+                f"helper hung under retained stdin writer (stderr={stderr!r})"
+            )
+        stdout = proc.stdout.read() if proc.stdout else ""
+        stderr = proc.stderr.read() if proc.stderr else ""
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    finally:
+        if proc.stdin:
+            proc.stdin.close()
+
+
 class TestBashStartsStdinSafety:
     """ACP/TUI hosts hang if the bash probe inherits the JSON-RPC stdin pipe."""
 
@@ -137,29 +171,34 @@ class TestBashStartsStdinSafety:
         assert local_mod._bash_starts(str(bash)) is True
         assert captured.get("stdin") is subprocess.DEVNULL
 
-    def test_bash_starts_returns_under_piped_stdin(self, tmp_path):
-        """Regression: piped stdin must not stall the Windows/Git-Bash probe."""
-        import shutil
+    def test_bash_starts_returns_under_retained_stdin(self, tmp_path):
+        """Regression: retained open stdin must not stall the bash probe.
 
-        bash = shutil.which("bash")
-        if not bash:
-            pytest.skip("bash not available")
+        Uses a stdin-reading fake bash. With the writer kept open (ACP-like),
+        inheriting that fd hangs; ``stdin=DEVNULL`` returns promptly.
+        """
+        fake_bash = tmp_path / "bash"
+        fake_bash.write_text(
+            "#!{}\n"
+            "import sys\n"
+            "# Block if stdin is an open pipe with no EOF (inherited ACP stdin).\n"
+            "sys.stdin.buffer.read(1)\n"
+            "sys.exit(0)\n".format(sys.executable),
+            encoding="utf-8",
+        )
+        fake_bash.chmod(0o755)
 
         helper = (
-            "import sys\n"
             "from tools.environments.local import _bash_starts, _bash_starts_cache\n"
             "_bash_starts_cache.clear()\n"
-            f"print(_bash_starts({bash!r}))\n"
+            f"print(_bash_starts({str(fake_bash)!r}))\n"
         )
         repo_root = str(Path(__file__).resolve().parents[2])
-        proc = subprocess.run(
+        proc = _run_with_retained_stdin(
             [sys.executable, "-c", helper],
-            input="",  # keep stdin as a pipe (empty)
-            capture_output=True,
-            text=True,
-            timeout=20,
-            cwd=repo_root,
             env={**os.environ, "PYTHONPATH": repo_root},
+            cwd=repo_root,
+            timeout=10,
         )
         assert proc.returncode == 0, proc.stderr
         assert proc.stdout.strip() == "True"
