@@ -153,6 +153,9 @@ class TestActiveProfileHint:
     not as if it were the Hermes root (which would invent a nested
     ``.../profiles/<name>/profiles/<name>/`` path and mislabel the active
     profile's own skills/plugins/cron/memories as the default profile's).
+
+    It must also avoid leaking default-profile absolute paths and must not
+    teach the ``cross_profile=True`` bypass in the system prompt.
     """
 
     def _profile_layout(self, tmp_path: Path):
@@ -172,14 +175,15 @@ class TestActiveProfileHint:
         # Active session home is HERMES_HOME itself — not a nested profiles/ path.
         assert f"reads and writes {named}/" in stable
         assert f"{named}/profiles/hermes-security/" not in stable
-        # Default profile data lives at the Hermes root, not under the named home.
-        default_clause = stable.split("The default profile's data lives at ")[1]
-        default_paths = default_clause.split(" — ")[0]
-        assert f"{root}/skills/" in default_paths
-        assert f"{root}/plugins/" in default_paths
-        assert f"{root}/cron/" in default_paths
-        assert f"{root}/memories/" in default_paths
-        assert str(named) not in default_paths
+        # Describe default-profile layout conceptually — do not leak absolute
+        # default-profile paths or teach the cross_profile=True bypass.
+        assert "Hermes root" in stable
+        assert "parent of the profiles/" in stable
+        assert f"{root}/skills/" not in stable
+        assert f"{root}/plugins/" not in stable
+        assert f"{root}/cron/" not in stable
+        assert f"{root}/memories/" not in stable
+        assert "cross_profile=True" not in stable
 
     def test_default_profile_points_at_sibling_profiles_dir(self, monkeypatch, tmp_path):
         root, _named = self._profile_layout(tmp_path)
