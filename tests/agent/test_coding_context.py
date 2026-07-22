@@ -167,17 +167,28 @@ def _run_with_retained_stdin(cmd, *, env, cwd, timeout=10):
 
 class TestGitProbeStdioSafety:
     def test_git_probe_detaches_stdin(self, tmp_path, monkeypatch):
-        """ACP stdio hosts hang if git inherits the JSON-RPC stdin pipe."""
-        captured: dict = {}
+        """Workspace git probes go through bounded_git_probe (stdin=DEVNULL)."""
+        from hermes_cli import _subprocess_compat
 
-        def _fake_run(*args, **kwargs):
-            captured.update(kwargs)
-            return subprocess.CompletedProcess(args[0], 0, stdout="ok\n", stderr="")
+        spawns = []
 
-        monkeypatch.setattr(cc.subprocess, "run", _fake_run)
+        class _FakePopen:
+            def __init__(self, cmd, **kwargs):
+                spawns.append((cmd, kwargs))
+                self.returncode = 0
+
+            def communicate(self, timeout=None):
+                return ("ok\n", "")
+
+            def kill(self):  # pragma: no cover
+                raise AssertionError("kill() must not run on the fast path")
+
+        monkeypatch.setattr(_subprocess_compat.subprocess, "Popen", _FakePopen)
         assert cc._git(tmp_path, "status", "--porcelain=2") == "ok"
-        assert captured.get("stdin") is subprocess.DEVNULL
-        env = captured.get("env") or {}
+        assert len(spawns) == 1, spawns
+        _cmd, kwargs = spawns[0]
+        assert kwargs.get("stdin") is subprocess.DEVNULL
+        env = kwargs.get("env") or {}
         assert env.get("GIT_TERMINAL_PROMPT") == "0"
         assert env.get("GCM_INTERACTIVE") == "never"
 
