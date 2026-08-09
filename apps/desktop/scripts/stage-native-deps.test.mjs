@@ -5,7 +5,9 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { test } from 'vitest'
 
+import { prepareGetWindowsForHost } from './postinstall.mjs'
 import {
+  rebuildGetWindowsViaNpm,
   stageGetWindowsInto,
   stageNodePtyInto,
   classifyNativeBinary
@@ -360,6 +362,85 @@ test('validation rejects a staged binary with the wrong platform magic', () => {
 })
 
 // ─── stageGetWindowsInto tests ──────────────────────────────────────
+
+test('root install denies get-windows scripts until the target architecture is known', () => {
+  const rootPackage = JSON.parse(
+    fs.readFileSync(path.resolve(import.meta.dirname, '..', '..', '..', 'package.json'), 'utf8')
+  )
+
+  assert.equal(rootPackage.allowScripts?.['get-windows@9.3.0'], false)
+  assert.equal(rootPackage.scripts?.postinstall, 'node apps/desktop/scripts/postinstall.mjs')
+})
+
+test('root postinstall rebuilds get-windows for supported Windows hosts', () => {
+  for (const arch of ['x64', 'ia32']) {
+    let calls = 0
+    const rebuilt = prepareGetWindowsForHost({
+      platform: 'win32',
+      arch,
+      installed: true,
+      rebuild: () => {
+        calls += 1
+        return 0
+      }
+    })
+
+    assert.equal(rebuilt, true)
+    assert.equal(calls, 1)
+  }
+})
+
+test('root postinstall skips get-windows rebuild on ARM64, non-Windows, and root-only installs', () => {
+  const rebuild = () => {
+    throw new Error('rebuild should not run')
+  }
+
+  assert.equal(
+    prepareGetWindowsForHost({ platform: 'win32', arch: 'arm64', installed: true, rebuild }),
+    false
+  )
+  assert.equal(
+    prepareGetWindowsForHost({ platform: 'darwin', arch: 'arm64', installed: true, rebuild }),
+    false
+  )
+  assert.equal(
+    prepareGetWindowsForHost({ platform: 'win32', arch: 'x64', installed: false, rebuild }),
+    false
+  )
+})
+
+test('root postinstall fails a supported Windows install when the targeted rebuild fails', () => {
+  assert.throws(
+    () =>
+      prepareGetWindowsForHost({
+        platform: 'win32',
+        arch: 'x64',
+        installed: true,
+        rebuild: () => 1
+      }),
+    /npm rebuild get-windows exited with 1/
+  )
+})
+
+test('supported Windows targets rebuild only get-windows through the explicit policy override', () => {
+  let invocation
+  const spawn = (...args) => {
+    invocation = args
+    return { status: 0 }
+  }
+
+  const status = rebuildGetWindowsViaNpm({ spawn, platform: 'win32' })
+
+  assert.equal(status, 0)
+  assert.equal(invocation[0], 'npm')
+  assert.deepEqual(invocation[1], [
+    'rebuild',
+    'get-windows@9.3.0',
+    '--dangerously-allow-all-scripts'
+  ])
+  assert.equal(invocation[2].stdio, 'inherit')
+  assert.equal(invocation[2].shell, true)
+})
 
 /** Create a minimal fake get-windows source tree in a temp dir. */
 function makeFakeGetWindows(srcRoot, { version = '9.3.0', bindings = [] } = {}) {

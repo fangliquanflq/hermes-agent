@@ -534,16 +534,24 @@ export function stageGetWindowsInto(
   return destRoot
 }
 
-function rebuildGetWindowsViaNpm() {
-  const result = spawnSync('npm', ['rebuild', 'get-windows'], {
-    cwd: resolve(projectRoot, '..', '..'),
-    stdio: 'inherit',
-    // npm resolves to npm.cmd on Windows, which needs a shell.
-    shell: process.platform === 'win32'
-  })
+export function rebuildGetWindowsViaNpm({ spawn = spawnSync, platform = process.platform } = {}) {
+  // Root installs intentionally deny get-windows because win32-arm64 has no
+  // published binding. Root postinstall and packaging call this only for
+  // supported Windows targets and scope npm to this exact reviewed package.
+  const result = spawn(
+    'npm',
+    ['rebuild', 'get-windows@9.3.0', '--dangerously-allow-all-scripts'],
+    {
+      cwd: resolve(projectRoot, '..', '..'),
+      stdio: 'inherit',
+      // npm resolves to npm.cmd on Windows, which needs a shell.
+      shell: platform === 'win32'
+    }
+  )
   if (result.status !== 0) {
     console.warn(`[stage-native-deps] npm rebuild get-windows exited with ${result.status}`)
   }
+  return result.status
 }
 
 export function stageGetWindows({ platform = process.platform, arch = process.arch } = {}) {
