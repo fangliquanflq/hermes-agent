@@ -110,6 +110,45 @@ def test_refresh_repairs_venv_after_lazy_failure(tmp_path, monkeypatch, capsys):
     assert "Backends keep their previously-installed version" not in out
 
 
+def test_lazy_refresh_reuses_update_venv(tmp_path, monkeypatch):
+    import tools.lazy_deps as lazy_deps_mod
+
+    monkeypatch.setattr(lazy_deps_mod, "active_features", lambda: ["platform.discord"])
+    refresh_calls = []
+
+    def fake_refresh(**kwargs):
+        refresh_calls.append(kwargs)
+        return {"platform.discord": "current"}
+
+    monkeypatch.setattr(lazy_deps_mod, "refresh_active_features", fake_refresh)
+
+    assert m._refresh_active_lazy_features(
+        ["uv", "pip"], env={"VIRTUAL_ENV": str(tmp_path)}
+    )
+    assert refresh_calls == [{"prompt": False, "venv": str(tmp_path)}]
+
+
+def test_memory_refresh_reuses_update_venv(tmp_path, monkeypatch):
+    install_calls = []
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"memory": {"provider": "hindsight"}},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.memory_setup._install_dependencies",
+        lambda provider, **kwargs: install_calls.append((provider, kwargs)),
+    )
+
+    m._refresh_active_memory_provider_dependencies(
+        env={"VIRTUAL_ENV": str(tmp_path)}
+    )
+
+    assert install_calls == [
+        ("hindsight", {"force": True, "venv": str(tmp_path)})
+    ]
+
+
 
 
 

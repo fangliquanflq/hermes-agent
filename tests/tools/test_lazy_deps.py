@@ -12,6 +12,8 @@ call is mocked — we never actually shell out during unit tests.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 
 import pytest
 
@@ -391,6 +393,71 @@ class TestRefreshActiveFeatures:
 
 
 class TestInstallSpecs:
+    def test_explicit_venv_targets_uv_when_updater_interpreter_is_external(
+        self, tmp_path, monkeypatch
+    ):
+        """Update-time refreshes must reuse the venv selected by the updater.
+
+        ``sys.executable`` can be the bootstrap interpreter rather than the
+        managed Hermes venv. Reconstructing VIRTUAL_ENV from it makes uv reject
+        the refresh with "No virtual environment found".
+        """
+        managed_venv = tmp_path / "managed-venv"
+        monkeypatch.setattr(ld, "_allow_lazy_installs", lambda: True)
+        monkeypatch.setattr("hermes_cli.managed_uv.resolve_uv", lambda: "uv")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        monkeypatch.setattr(ld.subprocess, "run", fake_run)
+
+        result = ld.install_specs(["hindsight-client>=0.6.1"], venv=managed_venv)
+
+        assert result.ok is True
+        assert calls[0][0] == [
+            "uv",
+            "pip",
+            "install",
+            "hindsight-client>=0.6.1",
+        ]
+        assert calls[0][1]["env"]["VIRTUAL_ENV"] == str(managed_venv)
+
+    def test_explicit_venv_targets_its_python_for_pip_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        from hermes_constants import venv_python_path
+
+        managed_venv = tmp_path / "managed-venv"
+        expected_python = venv_python_path(
+            managed_venv, windows=sys.platform == "win32"
+        )
+        monkeypatch.setattr(ld, "_allow_lazy_installs", lambda: True)
+        monkeypatch.setattr("hermes_cli.managed_uv.resolve_uv", lambda: None)
+        monkeypatch.setattr(ld.shutil, "which", lambda _name: None)
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        monkeypatch.setattr(ld.subprocess, "run", fake_run)
+
+        result = ld.install_specs(["hindsight-client>=0.6.1"], venv=managed_venv)
+
+        assert result.ok is True
+        assert calls == [
+            [str(expected_python), "-m", "pip", "--version"],
+            [
+                str(expected_python),
+                "-m",
+                "pip",
+                "install",
+                "hindsight-client>=0.6.1",
+            ],
+        ]
+
     def test_empty_specs_is_trivially_ok(self, monkeypatch):
         monkeypatch.setattr(
             ld, "_venv_pip_install",

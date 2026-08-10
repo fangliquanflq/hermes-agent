@@ -698,13 +698,19 @@ def _core_constraints_file() -> Optional[Path]:
         return None
 
 
-def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _InstallResult:
+def _venv_pip_install(
+    specs: tuple[str, ...],
+    *,
+    timeout: int = 300,
+    venv: str | Path | None = None,
+) -> _InstallResult:
     """Install ``specs`` using the uv → pip → ensurepip ladder.
 
     Two modes:
 
     * **Venv-scoped (default).** Installs into the active venv
-      (``sys.executable``). Used on normal installs.
+      (``sys.executable``). Callers such as ``hermes update`` may provide the
+      managed venv explicitly when the bootstrap interpreter lives elsewhere.
     * **Durable-target.** When :data:`_LAZY_TARGET_ENV` is set, installs into
       that directory via ``--target`` and constrains shared deps to the
       core venv's versions (see :func:`_core_constraints_file`). The target
@@ -735,7 +741,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         constraint_args = ["--constraint", str(constraints)]
 
     try:
-        venv_root = Path(sys.executable).parent.parent
+        venv_root = Path(venv) if venv is not None else Path(sys.executable).parent.parent
         from tools.environments.local import hermes_subprocess_env
         uv_env = hermes_subprocess_env(inherit_credentials=False)
         uv_env["VIRTUAL_ENV"] = str(venv_root)
@@ -780,7 +786,15 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
                 logger.debug("uv invocation failed: %s", e)
 
         # Tier 2: python -m pip (with ensurepip bootstrap if needed)
-        pip_cmd = [sys.executable, "-m", "pip"]
+        if venv is None:
+            pip_python = Path(sys.executable)
+        else:
+            from hermes_constants import venv_python_path
+
+            pip_python = venv_python_path(
+                venv_root, windows=sys.platform == "win32"
+            )
+        pip_cmd = [str(pip_python), "-m", "pip"]
         try:
             probe = subprocess.run(
                 pip_cmd + ["--version"],
@@ -793,7 +807,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         except (subprocess.TimeoutExpired, FileNotFoundError):
             try:
                 subprocess.run(
-                    [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
+                    [str(pip_python), "-m", "ensurepip", "--upgrade", "--default-pip"],
                     capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120, check=True,
                     stdin=subprocess.DEVNULL,
                     creationflags=windows_hide_flags(),
@@ -841,7 +855,12 @@ def feature_missing(feature: str) -> tuple[str, ...]:
     return tuple(s for s in feature_specs(feature) if not _is_satisfied(s))
 
 
-def ensure(feature: str, *, prompt: bool = True) -> None:
+def ensure(
+    feature: str,
+    *,
+    prompt: bool = True,
+    venv: str | Path | None = None,
+) -> None:
     """Make sure all packages for ``feature`` are importable.
 
     If they're missing, attempts to install them in the active venv. Raises
@@ -941,7 +960,7 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
             )
 
     logger.info("Lazy-installing %s for feature %r", " ".join(missing), feature)
-    result = _venv_pip_install(missing)
+    result = _venv_pip_install(missing, venv=venv)
     if not result.success:
         # Surface the actual pip error so the user can debug PyPI-side
         # issues (404 quarantine, network down, etc.).
@@ -1018,7 +1037,12 @@ class InstallSpecsResult:
     stderr: str = ""
 
 
-def install_specs(specs: list[str] | tuple[str, ...], *, timeout: int = 300) -> InstallSpecsResult:
+def install_specs(
+    specs: list[str] | tuple[str, ...],
+    *,
+    timeout: int = 300,
+    venv: str | Path | None = None,
+) -> InstallSpecsResult:
     """Install arbitrary (validated) pip specs through the lazy-install pipeline.
 
     This is the environment-aware install path for callers whose package
@@ -1026,7 +1050,8 @@ def install_specs(specs: list[str] | tuple[str, ...], *, timeout: int = 300) -> 
     ``pip_dependencies``) rather than the static :data:`LAZY_DEPS` allowlist.
     It applies the exact same environment routing as :func:`ensure`:
 
-    * **Venv-scoped by default** — installs into ``sys.executable``'s venv.
+    * **Venv-scoped by default** — installs into ``sys.executable``'s venv;
+      update-time callers can pass the managed venv explicitly.
     * **Durable-target on immutable images** — when the deployment seals the
       agent venv (``HERMES_DISABLE_LAZY_INSTALLS=1``) and sets
       ``HERMES_LAZY_INSTALL_TARGET``, installs are redirected to the writable
@@ -1073,7 +1098,7 @@ def install_specs(specs: list[str] | tuple[str, ...], *, timeout: int = 300) -> 
 
     logger.info("Installing pip specs %s (target=%s)", " ".join(cleaned), target or "venv")
     try:
-        result = _venv_pip_install(cleaned, timeout=timeout)
+        result = _venv_pip_install(cleaned, timeout=timeout, venv=venv)
     except Exception as exc:
         logger.warning("install_specs failed unexpectedly: %s", exc)
         return InstallSpecsResult(
@@ -1120,7 +1145,11 @@ def active_features() -> list[str]:
     return active
 
 
-def refresh_active_features(*, prompt: bool = False) -> dict[str, str]:
+def refresh_active_features(
+    *,
+    prompt: bool = False,
+    venv: str | Path | None = None,
+) -> dict[str, str]:
     """Re-run ``ensure`` for every feature the user has previously activated.
 
     Returns a ``{feature: status}`` map where status is one of:
@@ -1146,7 +1175,7 @@ def refresh_active_features(*, prompt: bool = False) -> dict[str, str]:
             continue
 
         try:
-            ensure(feature, prompt=prompt)
+            ensure(feature, prompt=prompt, venv=venv)
             results[feature] = "refreshed"
         except FeatureUnavailable as e:
             # Distinguish "user opted out" or platform-incompatible features

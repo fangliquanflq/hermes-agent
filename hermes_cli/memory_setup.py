@@ -104,7 +104,12 @@ def _prompt(label: str, default: str | None = None, secret: bool = False) -> str
 # Provider discovery
 # ---------------------------------------------------------------------------
 
-def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
+def _install_dependencies(
+    provider_name: str,
+    *,
+    force: bool = False,
+    venv: str | Path | None = None,
+) -> None:
     """Install pip dependencies declared in ``plugin.yaml``.
 
     When ``force`` is true, every declared dependency is handed to the
@@ -170,7 +175,10 @@ def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
 
     manual_cmd = f"uv pip install {' '.join(missing)}"
     try:
-        outcome = install_specs(missing, timeout=120)
+        install_kwargs = {"timeout": 120}
+        if venv is not None:
+            install_kwargs["venv"] = venv
+        outcome = install_specs(missing, **install_kwargs)
         if outcome.ok:
             print(f"  ✓ Installed {', '.join(missing)}")
         elif outcome.blocked:

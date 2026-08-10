@@ -986,7 +986,9 @@ def _update_via_zip(args):
     # ZIP path parity: heal the active memory provider's bridge packages
     # after the dependency reinstall, same as the git-pull path (#53272,
     # #70636).
-    _m()._refresh_active_memory_provider_dependencies()
+    _m()._refresh_active_memory_provider_dependencies(
+        env=uv_env if uv_bin else None
+    )
 
     # Now that dependencies are installed, verify the tree actually imports.
     # The copy loop above replaces top-level entries one at a time in
@@ -1831,7 +1833,10 @@ def _refresh_active_lazy_features(
 
     unexpected_failure = False
     try:
-        results = lazy_deps.refresh_active_features(prompt=False)
+        results = lazy_deps.refresh_active_features(
+            prompt=False,
+            venv=env.get("VIRTUAL_ENV") if env else None,
+        )
     except Exception as exc:
         # refresh_active_features is documented as never-raise, but defend
         # the update flow against future regressions.
@@ -1890,7 +1895,10 @@ def _refresh_active_lazy_features(
         )
     return False
 
-def _refresh_active_memory_provider_dependencies() -> None:
+def _refresh_active_memory_provider_dependencies(
+    *,
+    env: dict[str, str] | None = None,
+) -> None:
     """Refresh pip dependencies for the configured external memory provider.
 
     Memory-provider bridge packages are declared in each provider's
@@ -1934,7 +1942,10 @@ def _refresh_active_memory_provider_dependencies() -> None:
     print(f"→ Refreshing active memory provider dependencies ({provider})...")
 
     try:
-        _install_dependencies(provider, force=True)
+        install_kwargs = {"force": True}
+        if env and env.get("VIRTUAL_ENV"):
+            install_kwargs["venv"] = env["VIRTUAL_ENV"]
+        _install_dependencies(provider, **install_kwargs)
     except Exception as exc:
         print(f"  ⚠ {provider} dependencies failed to refresh: {exc}")
 
@@ -4468,7 +4479,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Heal the active memory provider's bridge packages last — the core
         # reinstall + lazy refresh above may have stripped or downgraded
         # plugin.yaml-declared deps that aren't in extras (#53272, #70636).
-        _m()._refresh_active_memory_provider_dependencies()
+        _m()._refresh_active_memory_provider_dependencies(env=lazy_env)
 
         # Everything that can legitimately produce a transient ImportError has
         # now run (bytecode sweep, dependency reinstall, lazy refresh), so a
