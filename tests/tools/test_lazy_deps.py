@@ -393,6 +393,37 @@ class TestRefreshActiveFeatures:
 
 
 class TestInstallSpecs:
+    def test_bootstrap_interpreter_recovers_managed_project_venv(
+        self, tmp_path, monkeypatch
+    ):
+        import hermes_cli.main as cli_main
+
+        project_root = tmp_path / "project"
+        managed_venv = project_root / "venv"
+        managed_venv.mkdir(parents=True)
+        (managed_venv / "pyvenv.cfg").write_text("home = test\n", encoding="utf-8")
+
+        monkeypatch.setattr(cli_main, "PROJECT_ROOT", project_root)
+        monkeypatch.setattr(
+            ld.sys,
+            "executable",
+            str(tmp_path / "bootstrap" / "python.exe"),
+        )
+        monkeypatch.setattr(ld, "_allow_lazy_installs", lambda: True)
+        monkeypatch.setattr("hermes_cli.managed_uv.resolve_uv", lambda: "uv")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        monkeypatch.setattr(ld.subprocess, "run", fake_run)
+
+        result = ld.install_specs(["hindsight-client>=0.6.1"])
+
+        assert result.ok is True
+        assert calls[0][1]["env"]["VIRTUAL_ENV"] == str(managed_venv)
+
     def test_explicit_venv_targets_uv_when_updater_interpreter_is_external(
         self, tmp_path, monkeypatch
     ):

@@ -698,6 +698,33 @@ def _core_constraints_file() -> Optional[Path]:
         return None
 
 
+def _resolve_venv_root(venv: str | Path | None = None) -> Path:
+    """Resolve the install venv, including bootstrap-interpreter layouts.
+
+    ``hermes update`` reloads this module after replacing the checkout, but
+    the updater helper that called it may still be the pre-update function
+    object.  That old caller cannot forward the updater-selected venv.  When
+    the running interpreter is not itself inside a venv, recover the managed
+    ``PROJECT_ROOT/venv`` target so the first update that ships a repair does
+    not need a second run to benefit from it.
+    """
+    if venv is not None:
+        return Path(venv)
+
+    interpreter_root = Path(sys.executable).parent.parent
+    if (interpreter_root / "pyvenv.cfg").is_file():
+        return interpreter_root
+
+    main_module = sys.modules.get("hermes_cli.main")
+    project_root = getattr(main_module, "PROJECT_ROOT", None)
+    if project_root is not None:
+        managed_root = Path(project_root) / "venv"
+        if (managed_root / "pyvenv.cfg").is_file():
+            return managed_root
+
+    return interpreter_root
+
+
 def _venv_pip_install(
     specs: tuple[str, ...],
     *,
@@ -741,7 +768,8 @@ def _venv_pip_install(
         constraint_args = ["--constraint", str(constraints)]
 
     try:
-        venv_root = Path(venv) if venv is not None else Path(sys.executable).parent.parent
+        interpreter_root = Path(sys.executable).parent.parent
+        venv_root = _resolve_venv_root(venv)
         from tools.environments.local import hermes_subprocess_env
         uv_env = hermes_subprocess_env(inherit_credentials=False)
         uv_env["VIRTUAL_ENV"] = str(venv_root)
@@ -786,7 +814,7 @@ def _venv_pip_install(
                 logger.debug("uv invocation failed: %s", e)
 
         # Tier 2: python -m pip (with ensurepip bootstrap if needed)
-        if venv is None:
+        if venv_root == interpreter_root:
             pip_python = Path(sys.executable)
         else:
             from hermes_constants import venv_python_path
