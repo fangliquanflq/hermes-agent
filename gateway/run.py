@@ -12785,6 +12785,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         connected_count = 0
         enabled_platform_count = 0
+        # Keep the global lifecycle degraded until every retryable startup
+        # failure reconnects. Non-retryable failures clear on the next start
+        # after the operator fixes their configuration.
+        self._startup_failed_platforms: set[Platform] = set()
         startup_nonretryable_errors: list[str] = []
         startup_retryable_errors: list[str] = []
         _multiplex_on = bool(getattr(self.config, "multiplex_profiles", False))
@@ -12946,6 +12950,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 continue
             if outcome == "exception":
                 logger.error("\u2717 %s error: %s", platform.value, exc)
+                self._startup_failed_platforms.add(platform)
                 # Same defensive cleanup path for exceptions -- an adapter that
                 # raised mid-connect may still have a live aiohttp.ClientSession or
                 # child subprocess.
@@ -12965,6 +12970,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 }
                 continue
             if outcome == "ok":
+                self._startup_failed_platforms.discard(platform)
                 self.adapters[platform] = adapter
                 self._sync_voice_mode_state_to_adapter(adapter)
                 # Wire voice input callback at connect time so voice
@@ -12978,6 +12984,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.info("\u2713 %s connected", platform.value)
             else:  # outcome == "failed"
                 logger.warning("\u2717 %s failed to connect", platform.value)
+                self._startup_failed_platforms.add(platform)
                 # Defensive cleanup: a failed connect() may have allocated resources
                 # (aiohttp.ClientSession, poll tasks, bridge subprocesses) before
                 # giving up. Without this call, those resources are orphaned and
@@ -13153,7 +13160,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         self._running = True
         self._install_plugin_message_injector()
-        self._update_runtime_status("running")
+        startup_state = (
+            "degraded"
+            if self._startup_failed_platforms
+            else "running"
+        )
+        self._update_runtime_status(startup_state)
 
         self._start_loop_heartbeat_task()
 
@@ -14336,6 +14348,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             adapter._voice_input_callback = self._handle_voice_channel_input
                         self.delivery_router.adapters = self.adapters
                         del self._failed_platforms[platform]
+                        startup_failed_platforms = getattr(
+                            self, "_startup_failed_platforms", None
+                        )
+                        if startup_failed_platforms is not None:
+                            startup_failed_platforms.discard(platform)
+                            if not startup_failed_platforms:
+                                self._update_runtime_status("running")
                         self._update_platform_runtime_status(
                             platform.value,
                             platform_state="connected",

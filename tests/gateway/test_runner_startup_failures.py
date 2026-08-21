@@ -374,6 +374,35 @@ async def test_runner_exits_with_ex_config_on_nonretryable_startup_error(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_runner_reports_degraded_when_one_configured_platform_fails(
+    monkeypatch, tmp_path
+):
+    """A healthy messaging adapter must not hide a failed API/control surface."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(enabled=True, token="***"),
+            Platform.DISCORD: PlatformConfig(enabled=True, token="***"),
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+
+    def create_adapter(platform, _platform_config):
+        if platform == Platform.TELEGRAM:
+            return _RetryableFailureAdapter()
+        return _SuccessfulAdapter()
+
+    monkeypatch.setattr(runner, "_create_adapter", create_adapter)
+
+    assert await runner.start() is True
+    assert Platform.DISCORD in runner.adapters
+    assert Platform.TELEGRAM in runner._failed_platforms
+    state = read_runtime_status()
+    assert state["gateway_state"] == "degraded"
+
+
+@pytest.mark.asyncio
 async def test_start_gateway_propagates_fatal_config_exit_code(monkeypatch, tmp_path):
     """A clean exit carrying GATEWAY_FATAL_CONFIG_EXIT_CODE must surface as a
     process-level SystemExit(78) — NOT a truthy return — so main() exits 78

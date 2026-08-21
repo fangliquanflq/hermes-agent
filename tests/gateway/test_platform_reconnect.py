@@ -169,6 +169,8 @@ class TestPlatformReconnectWatcher:
         message queued while the bot was offline."""
         runner = _make_runner()
         runner._sync_voice_mode_state_to_adapter = MagicMock()
+        runner._startup_failed_platforms = {Platform.TELEGRAM}
+        runner._update_runtime_status = MagicMock()
 
         runner._failed_platforms[Platform.TELEGRAM] = {
             "config": PlatformConfig(enabled=True, token="test"),
@@ -198,6 +200,8 @@ class TestPlatformReconnectWatcher:
             f"watcher must pass is_reconnect=True; got {succeed_adapter.connect_calls!r}"
         )
         assert Platform.TELEGRAM in runner.adapters
+        assert runner._startup_failed_platforms == set()
+        runner._update_runtime_status.assert_called_once_with("running")
 
     @pytest.mark.asyncio
     async def test_cold_connect_defaults_to_is_reconnect_false(self):

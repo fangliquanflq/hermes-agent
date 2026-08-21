@@ -4,6 +4,7 @@ Validates that is_network_accessible() correctly classifies addresses and
 that connect() refuses to start without API_SERVER_KEY.
 """
 
+import errno
 import socket
 from unittest.mock import patch
 
@@ -144,9 +145,39 @@ class TestBindMechanics:
         finally:
             await second.disconnect()
 
+    @pytest.mark.asyncio
+    async def test_initial_bind_waits_for_restarting_listener_to_release(
+        self, monkeypatch
+    ):
+        """A short-lived old listener must not permanently park api_server."""
+        adapter = self._make_adapter(self._free_port())
+        starts = 0
+
+        class FlakySite:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def start(self):
+                nonlocal starts
+                starts += 1
+                if starts == 1:
+                    raise OSError(errno.EADDRINUSE, "old listener still exiting")
+
+            async def stop(self):
+                pass
+
+        monkeypatch.setattr("gateway.platforms.api_server.web.TCPSite", FlakySite)
+
+        try:
+            assert await adapter.connect() is True
+            assert starts == 2
+            assert adapter.has_fatal_error is False
+        finally:
+            await adapter.disconnect()
+
 
     @pytest.mark.asyncio
-    async def test_port_conflict_sets_non_retryable_fatal_error(self):
+    async def test_port_conflict_sets_non_retryable_fatal_error(self, monkeypatch):
         """A real port conflict (EADDRINUSE) must set a non-retryable fatal
         error so the reconnect watcher drops the platform from the retry
         queue instead of looping indefinitely.
@@ -156,6 +187,9 @@ class TestBindMechanics:
         filling errors.log and leaking 2 fds per retry (#52132: 1568+
         retries over 5 days in a multi-profile setup).
         """
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._API_SERVER_BIND_GRACE_SECONDS", 0.0
+        )
         port = self._free_port()
         first = self._make_adapter(port)
         assert await first.connect() is True
