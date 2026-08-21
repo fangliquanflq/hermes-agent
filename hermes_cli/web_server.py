@@ -10382,8 +10382,8 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
     """Status for the "Anthropic API Key" catalog entry.
 
     Two sources, in priority order:
-    1. ``~/.hermes/.anthropic_oauth.json`` — Hermes-managed PKCE flow (what
-       this entry's Connect button writes)
+    1. ``~/.hermes/.anthropic_oauth.json`` — legacy Hermes-managed PKCE
+       credentials, retained so existing dashboard logins remain visible
     2. ``ANTHROPIC_API_KEY`` → ``ANTHROPIC_TOKEN`` → ``CLAUDE_CODE_OAUTH_TOKEN``
        env vars (registry order) — from ``.env``, the shell, or an external
        secret source like Bitwarden (whose keys are injected into the process
@@ -10500,7 +10500,7 @@ def _copilot_acp_status() -> Dict[str, Any]:
 # which unions them with every accounts-tab provider in ``provider_catalog()``
 # so newly-added OAuth/external providers appear automatically (no hand edit).
 # This tuple also still includes two entries that are NOT catalog providers but
-# must show on the Accounts tab: the api-key Anthropic PKCE card and the
+# must show on the Accounts tab: the CLI-managed Anthropic API-key card and the
 # synthetic ``claude-code`` subscription row.
 # ``flow`` describes the OAuth shape so the modal can pick the right UI:
 # ``pkce`` = open URL + paste callback code, ``device_code`` = show code +
@@ -10569,7 +10569,7 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
     {
         "id": "anthropic",
         "name": "Anthropic API Key",
-        "flow": "pkce",
+        "flow": "external",
         "cli_command": "hermes auth add anthropic",
         "docs_url": "https://docs.claude.com/en/api/getting-started",
         "status_fn": _anthropic_oauth_status,
@@ -10708,6 +10708,8 @@ def _oauth_provider_disconnect_command(provider: Dict[str, Any]) -> Optional[str
 
 def _oauth_provider_disconnect_hint(provider: Dict[str, Any], status: Dict[str, Any]) -> Optional[str]:
     """Return the manual disconnect path when the API cannot clear this provider."""
+    if provider.get("id") == "anthropic" and status.get("source") == "env_var":
+        return "Remove the API key from Settings → Keys instead."
     if provider.get("flow") == "external":
         if _oauth_provider_disconnect_command(provider):
             # The GUI offers a one-click "run in terminal" path; this hint is the
@@ -10724,9 +10726,9 @@ def _build_oauth_catalog() -> list[Dict[str, Any]]:
 
     MEMBERSHIP is the union of:
       1. ``_OAUTH_PROVIDER_CATALOG`` — the explicit, hand-tuned cards that carry
-         bespoke flow / status_fn / cli_command (including the api-key Anthropic
-         PKCE card and the synthetic claude-code subscription row, which are not
-         catalog providers), and
+         bespoke flow / status_fn / cli_command (including the CLI-managed
+         Anthropic API-key card and the synthetic claude-code subscription row,
+         which are not catalog providers), and
       2. every accounts-tab provider in the unified ``provider_catalog()`` (the
          ``hermes model`` universe) — so any OAuth/external provider added as a
          plugin appears automatically, with sensible defaults, even if no
@@ -10835,12 +10837,15 @@ async def disconnect_oauth_provider(
                            f"Available: {', '.join(sorted(catalog_by_id))}",
                 )
 
-            disconnect_hint = _oauth_provider_disconnect_hint(provider, {})
-            if disconnect_hint:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{provider['name']} cannot be disconnected automatically. {disconnect_hint}",
-                )
+            # The CLI-managed Anthropic row can represent either an API key or
+            # legacy Hermes PKCE credentials, so its removal hint needs status.
+            if provider_id != "anthropic":
+                disconnect_hint = _oauth_provider_disconnect_hint(provider, {})
+                if disconnect_hint:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{provider['name']} cannot be disconnected automatically. {disconnect_hint}",
+                    )
 
             status = _resolve_provider_status(provider_id, provider.get("status_fn"))
             disconnect_hint = _oauth_provider_disconnect_hint(provider, status)

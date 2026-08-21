@@ -108,6 +108,34 @@ def test_minimax_login_does_not_launch_anthropic_flow():
     assert body["expires_in"] == 600
 
 
+def test_anthropic_api_key_entry_does_not_start_subscription_oauth():
+    """The API-key row is CLI-managed and cannot launch claude.ai OAuth."""
+    from hermes_cli import web_server as ws
+
+    catalog_resp = client.get("/api/providers/oauth", headers=HEADERS)
+    assert catalog_resp.status_code == 200, catalog_resp.text
+    anthropic = next(
+        provider
+        for provider in catalog_resp.json()["providers"]
+        if provider["id"] == "anthropic"
+    )
+    assert anthropic["name"] == "Anthropic API Key"
+    assert anthropic["flow"] == "external"
+
+    with patch.object(
+        ws,
+        "_start_anthropic_pkce",
+        side_effect=AssertionError("API-key row must not start subscription OAuth"),
+    ):
+        start_resp = client.post(
+            "/api/providers/oauth/anthropic/start",
+            headers=HEADERS,
+        )
+
+    assert start_resp.status_code == 400
+    assert "external CLI" in start_resp.json()["detail"]
+
+
 
 
 def test_oauth_provider_status_uses_profile_query(tmp_path, monkeypatch):
