@@ -506,6 +506,23 @@ def _fail_and_issue(text: str, detail: str, fix: str, issues: list[str]) -> None
     issues.append(fix)
 
 
+def _report_windows_preflight(manual_issues: list[str]) -> None:
+    """Render Windows preflight findings and collect manual remediations."""
+    from hermes_cli.windows_preflight import collect_windows_preflight_rows
+
+    _section("Windows Preflight")
+    for status, text, detail, fix in collect_windows_preflight_rows(PROJECT_ROOT):
+        if status == "ok":
+            check_ok(text, detail)
+        elif status == "warn":
+            check_warn(text, detail)
+            if fix:
+                check_info(f"Fix: {fix}")
+                manual_issues.append(fix)
+        else:
+            check_info(f"{text} {detail}".rstrip())
+
+
 # Deprecated / legacy config keys still read for back-compat. Doctor surfaces
 # them as non-failing warnings with the modern replacement — it does not
 # auto-migrate or delete (migrations live in config.py version steps).
@@ -1981,6 +1998,9 @@ def run_doctor(args):
 
     _check_gateway_service_linger(issues)
     _check_s6_supervision(issues)
+
+    if sys.platform == "win32":
+        _report_windows_preflight(manual_issues)
 
     if sys.platform != "win32":
         _section("Command Installation")
