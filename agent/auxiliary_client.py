@@ -1455,15 +1455,33 @@ def _scoped_key_env(name: str) -> str:
     if not name:
         return ""
     try:
-        from agent.secret_scope import UnscopedSecretError, get_secret
+        from agent.secret_scope import (
+            UnscopedSecretError,
+            build_profile_secret_scope,
+            current_secret_scope,
+            get_secret,
+            is_multiplex_active,
+        )
+    except ImportError:
+        return (os.getenv(name) or "").strip()
 
-        try:
-            return (get_secret(name) or "").strip()
-        except UnscopedSecretError:
-            pass
-    except Exception:
-        pass
-    return (os.getenv(name) or "").strip()
+    try:
+        value = (get_secret(name) or "").strip()
+    except UnscopedSecretError:
+        # In a multiplex process os.environ belongs to the default profile.
+        # Borrowing it here would leak that profile's credential into an
+        # unscoped auxiliary call, so preserve the fail-closed signal as a miss.
+        return ""
+    if value:
+        return value
+
+    # Single-profile startup probes can run before the normal dotenv overlay is
+    # installed. Resolve the active profile's credential directly on that one
+    # unscoped path so startup order cannot turn a configured key_env into an
+    # unauthenticated request. Installed scopes remain authoritative overlays.
+    if current_secret_scope() is None and not is_multiplex_active():
+        return (build_profile_secret_scope(get_hermes_home()).get(name) or "").strip()
+    return ""
 
 
 # ── Codex Responses → chat.completions adapter ─────────────────────────────
@@ -6645,6 +6663,13 @@ def resolve_provider_client(
                 custom_key = build_command_token_provider(
                     custom_key_cmd, custom_entry.get("name") or provider
                 ) or custom_key
+            if not custom_key and (custom_key_env or custom_key_cmd):
+                provider_name = custom_entry.get("name") or provider
+                source = custom_key_env or "key_cmd"
+                raise RuntimeError(
+                    f"Named custom provider {provider_name!r} declares credential "
+                    f"source {source!r}, but it could not be resolved; request not sent."
+                )
             custom_key = custom_key or "no-key-required"
             if custom_key == "no-key-required":
                 logger.warning(
@@ -8080,6 +8105,11 @@ def _resolve_task_provider_model(
             ).strip()
             if cfg_key_env:
                 cfg_api_key = _scoped_key_env(cfg_key_env) or None
+                if not cfg_api_key:
+                    raise RuntimeError(
+                        f"Auxiliary task {task!r} declares credential source "
+                        f"{cfg_key_env!r}, but it could not be resolved; request not sent."
+                    )
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
 
     # 'auto' is a sentinel meaning "inherit from main runtime / auto-detect", not

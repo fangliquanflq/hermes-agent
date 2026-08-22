@@ -122,7 +122,60 @@ class TestResolveProviderClientNamedCustom:
         assert client is not None
         # no-key-required should be used
 
+    def test_named_custom_declared_key_env_fails_closed_when_unresolved(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("BEANS_API_KEY", raising=False)
+        _write_config(tmp_path, {
+            "model": {"default": "test-model"},
+            "custom_providers": [
+                {
+                    "name": "beans",
+                    "base_url": "https://beans.example/v1",
+                    "key_env": "BEANS_API_KEY",
+                },
+            ],
+        })
 
+        from agent.auxiliary_client import resolve_provider_client
+
+        with patch("agent.auxiliary_client._create_openai_client") as create_client:
+            with pytest.raises(RuntimeError, match="BEANS_API_KEY.*could not be resolved"):
+                resolve_provider_client("beans", "my-model")
+
+        create_client.assert_not_called()
+
+
+class TestAuxiliaryDeclaredKeyEnvResolution:
+    def test_task_key_env_fails_closed_when_unresolved(self, monkeypatch):
+        monkeypatch.delenv("VISION_API_KEY", raising=False)
+        task_config = {
+            "provider": "custom",
+            "model": "vision-model",
+            "base_url": "https://vision.example/v1",
+            "key_env": "VISION_API_KEY",
+        }
+
+        from agent.auxiliary_client import _resolve_task_provider_model
+
+        with patch(
+            "agent.auxiliary_client._get_auxiliary_task_config",
+            return_value=task_config,
+        ):
+            with pytest.raises(RuntimeError, match="VISION_API_KEY.*could not be resolved"):
+                _resolve_task_provider_model(task="vision")
+
+    def test_unscoped_single_profile_read_lazily_resolves_profile_dotenv(
+        self, tmp_path, monkeypatch
+    ):
+        from agent import secret_scope
+        from agent.auxiliary_client import _scoped_key_env
+
+        monkeypatch.delenv("VISION_API_KEY", raising=False)
+        (tmp_path / ".hermes" / ".env").write_text("VISION_API_KEY=profile-key\n")
+        secret_scope.set_multiplex_active(False)
+
+        assert _scoped_key_env("VISION_API_KEY") == "profile-key"
 
 class TestResolveProviderClientModelNormalization:
     """Direct-provider auxiliary routing should normalize models like main runtime."""

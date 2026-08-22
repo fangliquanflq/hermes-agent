@@ -186,12 +186,12 @@ class TestAuxiliaryScopedKeyEnv:
         with _Scope({"UNRELATED": "x"}):
             assert _scoped_key_env("OPENAI_API_KEY") == ""
 
-    def test_unscoped_multiplex_falls_back(self, monkeypatch):
+    def test_unscoped_multiplex_does_not_borrow_process_env(self, monkeypatch):
         from agent.auxiliary_client import _scoped_key_env
 
         monkeypatch.setenv("OPENAI_API_KEY", "sk-own-env")
         ss.set_multiplex_active(True)
-        assert _scoped_key_env("OPENAI_API_KEY") == "sk-own-env"
+        assert _scoped_key_env("OPENAI_API_KEY") == ""
 
     def test_empty_name_returns_empty(self):
         from agent.auxiliary_client import _scoped_key_env
