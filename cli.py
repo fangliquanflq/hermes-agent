@@ -10840,6 +10840,31 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         self._restore_modal_input_snapshot()
         self._invalidate(min_interval=0.0)
 
+    def _rebind_model_switch_credential_pool(self, result) -> bool:
+        """Bind CLI lazy-agent state to a switched provider's credential pool."""
+        if not result.provider_changed:
+            return False
+
+        target = (result.target_provider or "").strip().lower()
+        current = getattr(self, "_credential_pool", None)
+        if (getattr(current, "provider", "") or "").strip().lower() == target:
+            return True
+
+        # A pool bound to the previous provider is worse than no pool: the
+        # recovery guard rejects it and skips rotation on every 401/429.
+        self._credential_pool = None
+        try:
+            from agent.credential_pool import load_pool
+
+            self._credential_pool = load_pool(result.target_provider)
+        except Exception:
+            logger.debug(
+                "CLI model switch could not reload credential pool for %s",
+                result.target_provider,
+                exc_info=True,
+            )
+        return self._credential_pool is not None
+
     def _snapshot_model_runtime(self) -> dict:
         """Capture current CLI and agent model runtime for one-turn restore."""
         agent = getattr(self, "agent", None)
@@ -10852,6 +10877,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "api_key": self.api_key,
             "base_url": self.base_url,
             "api_mode": self.api_mode,
+            "_credential_pool": getattr(self, "_credential_pool", None),
             "agent_primary_runtime": copy.deepcopy(
                 getattr(agent, "_primary_runtime", None)
             ) if agent is not None else None,
@@ -10870,6 +10896,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "api_key",
             "base_url",
             "api_mode",
+            "_credential_pool",
         ):
             if key in snapshot:
                 setattr(self, key, snapshot.get(key))
@@ -11017,15 +11044,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "api_key": self.api_key,
             "base_url": self.base_url,
             "api_mode": self.api_mode,
+            "_credential_pool": getattr(self, "_credential_pool", None),
         }
         self.model = result.new_model
         self.provider = result.target_provider
         self.requested_provider = result.target_provider
+        _pool_rebound = HermesCLI._rebind_model_switch_credential_pool(self, result)
         # Always overwrite explicit overrides so stale credentials from the
         # previous provider (e.g. Ollama api_key/base_url) don't leak into
-        # the new provider's credential resolution on the next turn.
-        self._explicit_api_key = result.api_key
-        self._explicit_base_url = result.base_url
+        # the new provider's credential resolution on the next turn. A loaded
+        # target pool must remain the resolver's source of truth; treating its
+        # selected key/URL as explicit overrides bypasses pool resolution.
+        self._explicit_api_key = None if _pool_rebound else result.api_key
+        self._explicit_base_url = None if _pool_rebound else result.base_url
         if result.api_key:
             self.api_key = result.api_key
         if result.base_url:
@@ -11406,15 +11437,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "api_key": self.api_key,
             "base_url": self.base_url,
             "api_mode": self.api_mode,
+            "_credential_pool": getattr(self, "_credential_pool", None),
         }
         self.model = result.new_model
         self.provider = result.target_provider
         self.requested_provider = result.target_provider
+        _pool_rebound = HermesCLI._rebind_model_switch_credential_pool(self, result)
         # Always overwrite explicit overrides so stale credentials from the
         # previous provider (e.g. Ollama api_key/base_url) don't leak into
-        # the new provider's credential resolution on the next turn.
-        self._explicit_api_key = result.api_key
-        self._explicit_base_url = result.base_url
+        # the new provider's credential resolution on the next turn. A loaded
+        # target pool must remain the resolver's source of truth; treating its
+        # selected key/URL as explicit overrides bypasses pool resolution.
+        self._explicit_api_key = None if _pool_rebound else result.api_key
+        self._explicit_base_url = None if _pool_rebound else result.base_url
         if result.api_key:
             self.api_key = result.api_key
         if result.base_url:
