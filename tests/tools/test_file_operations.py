@@ -898,3 +898,59 @@ class TestEscapeNativeToolArg:
         assert node_cmds, f"no node command captured in: {commands}"
         assert "'C:/Users/alice/app/main.js'" in node_cmds[0]
         assert "/c/Users" not in node_cmds[0]
+
+
+@pytest.mark.windows_only
+class TestEscapeShellPattern:
+    """Regex arguments must be quoted without Windows path translation."""
+
+    def _ops(self, mock_env):
+        return ShellFileOperations(mock_env)
+
+    def test_preserves_regex_backslashes_on_windows(self, mock_env):
+        ops = self._ops(mock_env)
+
+        assert ops._escape_shell_pattern(r"syncBalance\(") == r"'syncBalance\('"
+        assert ops._escape_shell_pattern(r"currency\.") == r"'currency\.'"
+
+    def test_escapes_single_quotes_without_rewriting_backslashes(self, mock_env):
+        ops = self._ops(mock_env)
+
+        assert ops._escape_shell_pattern(r"owner's\+") == "'owner'\"'\"'s\\+'"
+
+    def test_rg_and_grep_commands_preserve_pattern(self, mock_env):
+        commands = []
+
+        def side_effect(command, **kwargs):
+            commands.append(command)
+            return {"output": "", "returncode": 1}
+
+        mock_env.execute.side_effect = side_effect
+        ops = self._ops(mock_env)
+
+        ops._search_with_rg(r"syncBalance\(", ".", None, 10, 0, "content", 0)
+        ops._search_with_grep(r"currency\.", ".", None, 10, 0, "content", 0)
+
+        assert r"'syncBalance\('" in commands[0]
+        assert r"'currency\.'" in commands[1]
+        assert "syncBalance/(" not in commands[0]
+        assert "currency/." not in commands[1]
+
+    def test_zero_match_probes_preserve_pattern(self, mock_env):
+        commands = []
+
+        def side_effect(command, **kwargs):
+            commands.append(command)
+            if "command -v" in command:
+                return {"output": "yes", "returncode": 0}
+            return {"output": "", "returncode": 1}
+
+        mock_env.execute.side_effect = side_effect
+        ops = self._ops(mock_env)
+
+        assert ops._zero_match_probe(r"currency\.", ".", None) is None
+
+        probes = [command for command in commands if "--count-matches" in command]
+        assert len(probes) == 3
+        assert all(r"'currency\.'" in command for command in probes)
+        assert all("currency/." not in command for command in probes)
