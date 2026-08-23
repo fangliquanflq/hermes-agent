@@ -1102,6 +1102,55 @@ def _(rid, params: dict) -> dict:
     )
 
 
+@method("session.events.resume")
+def _(rid, params: dict) -> dict:
+    """Atomically rebind sessions and replay events after each client cursor."""
+    cursors = params.get("cursors")
+    if not isinstance(cursors, dict):
+        return _err(rid, 4006, "cursors object required")
+
+    transport = current_transport() or _stdio_transport
+    resumed: dict[str, int] = {}
+    gaps: list[str] = []
+
+    for raw_sid, raw_cursor in cursors.items():
+        sid = str(raw_sid or "")
+        if not sid:
+            continue
+        try:
+            cursor = max(0, int(raw_cursor))
+        except (TypeError, ValueError):
+            continue
+
+        with _sessions_lock:
+            session = _sessions.get(sid)
+            if session is None or session.get("_finalized"):
+                continue
+            event_lock = session.setdefault("_event_lock", threading.RLock())
+
+        # _emit uses this same lock while assigning/logging/writing. Rebinding,
+        # replaying, then releasing it makes replay -> live one atomic stream.
+        with event_lock:
+            session["transport"] = transport
+            session["last_active"] = time.time()
+            event_log = session.get("_event_log")
+            frames = list(event_log) if isinstance(event_log, deque) else []
+            if frames:
+                first_seq = int((frames[0].get("params") or {}).get("event_seq") or 0)
+                if cursor < first_seq - 1:
+                    gaps.append(sid)
+                # Even after a bounded-log gap, replay the retained suffix: a
+                # terminal message.complete carries the authoritative full text
+                # and settles the renderer instead of leaving it stuck forever.
+                for frame in frames:
+                    seq = int((frame.get("params") or {}).get("event_seq") or 0)
+                    if seq > cursor:
+                        transport.write(frame)
+            resumed[sid] = int(session.get("_event_seq") or 0)
+
+    return _ok(rid, {"resumed": resumed, "snapshot_required": gaps})
+
+
 @method("session.delete")
 def _(rid, params: dict) -> dict:
     """Delete a stored session and its on-disk transcript files.

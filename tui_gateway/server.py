@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
@@ -143,6 +144,9 @@ from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
 _methods: dict[str, callable] = {}
+# Bounded per-session event history used to bridge transient WebSocket loss.
+_SESSION_EVENT_LOG_MAX = 4_096
+_SESSION_EVENT_LOG_MAX_BYTES = 8 * 1024 * 1024
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
 _answers: dict[str, str] = {}
@@ -1200,7 +1204,14 @@ def _close_sessions_for_transport(
             # Point detached sessions at the drop sentinel (NOT real stdio) so
             # _ws_session_is_orphaned recognizes them and the grace-reap can
             # actually fire; a standalone `hermes --tui` keeps real _stdio.
-            session["transport"] = _detached_ws_transport
+            with _sessions_lock:
+                event_lock = session.setdefault("_event_lock", threading.RLock())
+            with event_lock:
+                # A concurrent resume may have rebound this session while this
+                # disconnect waited for an in-progress event write.
+                if session.get("transport") is not transport:
+                    continue
+                session["transport"] = _detached_ws_transport
             detached += 1
             try:
                 _schedule_ws_orphan_reap(sid)
@@ -1668,17 +1679,54 @@ def write_json(obj: dict) -> bool:
        behaviour and keeping tests that monkey-patch ``_real_stdout`` green.
     """
     if obj.get("method") == "event":
-        sid = ((obj.get("params") or {}).get("session_id")) or ""
-        if sid and (t := (_sessions.get(sid) or {}).get("transport")) is not None:
-            return t.write(obj)
+        params = obj.get("params") or {}
+        sid = params.get("session_id") or ""
+        session = _sessions.get(sid) if sid else None
+        if session is not None:
+            # Sequence here rather than only in _emit: compute-host and other
+            # event producers also feed fully-formed frames through write_json.
+            with _sessions_lock:
+                event_lock = session.setdefault("_event_lock", threading.RLock())
+            with event_lock:
+                frame = obj
+                if not isinstance(params.get("event_seq"), int):
+                    event_seq = int(session.get("_event_seq") or 0) + 1
+                    session["_event_seq"] = event_seq
+                    frame = {**obj, "params": {**params, "event_seq": event_seq}}
+                    event_log = session.get("_event_log")
+                    if not isinstance(event_log, deque):
+                        event_log = deque()
+                        session["_event_log"] = event_log
+                    frame_size = len(json.dumps(frame, ensure_ascii=False, default=str))
+                    event_log.append(frame)
+                    event_log_bytes = int(session.get("_event_log_bytes") or 0) + frame_size
+                    while event_log and (
+                        len(event_log) > _SESSION_EVENT_LOG_MAX
+                        or event_log_bytes > _SESSION_EVENT_LOG_MAX_BYTES
+                    ):
+                        evicted = event_log.popleft()
+                        event_log_bytes -= len(
+                            json.dumps(evicted, ensure_ascii=False, default=str)
+                        )
+                    session["_event_log_bytes"] = max(0, event_log_bytes)
+                if (transport := session.get("transport")) is not None:
+                    return transport.write(frame)
 
     return (current_transport() or _stdio_transport).write(obj)
 
 
-def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
+def _event_frame(
+    event: str,
+    sid: str,
+    payload: dict | None = None,
+    *,
+    event_seq: int | None = None,
+) -> dict:
     params: dict = {"type": event, "session_id": sid}
     if payload is not None:
         params["payload"] = payload
+    if event_seq is not None:
+        params["event_seq"] = event_seq
     return {"jsonrpc": "2.0", "method": "event", "params": params}
 
 

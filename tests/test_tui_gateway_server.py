@@ -16818,6 +16818,101 @@ def test_close_sessions_for_transport_closes_flagged_repoints_rest(monkeypatch):
         server._sessions.clear()
 
 
+def test_session_event_resume_rebinds_replays_and_continues_live(monkeypatch):
+    class RecordingTransport:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, frame):
+            self.frames.append(frame)
+            return True
+
+    old = RecordingTransport()
+    replacement = RecordingTransport()
+    session = {"transport": old, "last_active": 0}
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+    server._sessions.clear()
+    server._sessions["resume-sid"] = session
+    try:
+        server.write_json(
+            server._event_frame("message.delta", "resume-sid", {"text": "one"})
+        )
+        server._emit("message.delta", "resume-sid", {"text": "two"})
+        server._close_sessions_for_transport(old)
+        server._emit("message.complete", "resume-sid", {"text": "one two"})
+
+        response = server.dispatch(
+            {
+                "id": "resume-1",
+                "method": "session.events.resume",
+                "params": {"cursors": {"resume-sid": 1}},
+            },
+            transport=replacement,
+        )
+
+        assert response["result"] == {
+            "resumed": {"resume-sid": 3},
+            "snapshot_required": [],
+        }
+        assert [frame["params"]["event_seq"] for frame in replacement.frames] == [2, 3]
+        assert replacement.frames[-1]["params"]["type"] == "message.complete"
+        assert session["transport"] is replacement
+
+        server._emit("session.info", "resume-sid", {"running": False})
+        assert [frame["params"]["event_seq"] for frame in replacement.frames] == [2, 3, 4]
+
+        replacement.frames.clear()
+        server.dispatch(
+            {
+                "id": "resume-2",
+                "method": "session.events.resume",
+                "params": {"cursors": {"resume-sid": 4}},
+            },
+            transport=replacement,
+        )
+        assert replacement.frames == []
+    finally:
+        server._sessions.clear()
+
+
+def test_session_event_resume_replays_retained_terminal_suffix_after_gap(monkeypatch):
+    class RecordingTransport:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, frame):
+            self.frames.append(frame)
+            return True
+
+    old = RecordingTransport()
+    replacement = RecordingTransport()
+    monkeypatch.setattr(server, "_SESSION_EVENT_LOG_MAX", 2)
+    monkeypatch.setattr(server, "_SESSION_EVENT_LOG_MAX_BYTES", 1024 * 1024)
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+    server._sessions.clear()
+    server._sessions["gap-sid"] = {"transport": old, "last_active": 0}
+    try:
+        server._emit("message.delta", "gap-sid", {"text": "one"})
+        server._emit("message.delta", "gap-sid", {"text": "two"})
+        server._close_sessions_for_transport(old)
+        server._emit("message.complete", "gap-sid", {"text": "one two"})
+
+        response = server.dispatch(
+            {
+                "id": "gap-resume",
+                "method": "session.events.resume",
+                "params": {"cursors": {"gap-sid": 0}},
+            },
+            transport=replacement,
+        )
+
+        assert response["result"]["snapshot_required"] == ["gap-sid"]
+        assert [frame["params"]["event_seq"] for frame in replacement.frames] == [2, 3]
+        assert replacement.frames[-1]["params"]["payload"]["text"] == "one two"
+    finally:
+        server._sessions.clear()
+
+
 def test_session_create_records_close_on_disconnect_flag(monkeypatch):
     monkeypatch.setattr(server, "_start_agent_build", lambda sid, session: None)
     server._sessions.clear()

@@ -24,6 +24,8 @@ export type GatewayEventName =
   | (string & {})
 
 export interface GatewayEvent<P = unknown> {
+  /** Monotonic per live session. Used to resume a replaced WebSocket. */
+  event_seq?: number
   payload?: P
   /** Renderer-side source tag added by the Desktop gateway registry. */
   profile?: string
@@ -93,6 +95,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
 
 export class JsonRpcGatewayClient {
+  private readonly eventCursors = new Map<string, number>()
+  private hasOpened = false
   private nextId = 0
   private pending = new Map<GatewayRequestId, PendingCall>()
   private socket: WebSocketLike | null = null
@@ -196,7 +200,21 @@ export class JsonRpcGatewayClient {
 
         settled = true
         cleanup()
+        const reconnecting = this.hasOpened
+
+        this.hasOpened = true
         this.setState('open')
+
+        if (reconnecting && this.eventCursors.size > 0) {
+          // Best-effort compatibility: older gateways reject this method, while
+          // current ones atomically rebind and replay before returning.
+          void this.request(
+            'session.events.resume',
+            { cursors: Object.fromEntries(this.eventCursors) },
+            Math.min(this.options.requestTimeoutMs, 5_000)
+          ).catch(() => undefined)
+        }
+
         resolve()
       }
 
@@ -408,7 +426,24 @@ export class JsonRpcGatewayClient {
     }
 
     if (frame.method === 'event' && frame.params?.type) {
-      this.dispatchEvent(frame.params)
+      const event = frame.params
+      const sid = event.session_id
+      const seq = event.event_seq
+
+      if (sid && Number.isSafeInteger(seq) && Number(seq) > 0) {
+        const previous = this.eventCursors.get(sid) ?? 0
+
+        if (Number(seq) <= previous) {
+          return
+        }
+
+        this.dispatchEvent(event)
+        this.eventCursors.set(sid, Number(seq))
+
+        return
+      }
+
+      this.dispatchEvent(event)
     }
   }
 
