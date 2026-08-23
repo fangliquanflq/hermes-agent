@@ -954,6 +954,28 @@ def _explicit_model_override(provider: str, model: str) -> Optional[Dict[str, An
     return None
 
 
+def get_explicit_model_capability_override(
+    provider: str, model: str, capability: str
+) -> Optional[bool]:
+    """Return an explicitly configured capability, preserving unknown.
+
+    Capability gates need to distinguish an explicit ``False`` from an
+    absent field. Resolving through ``ModelCapabilities`` would collapse an
+    unknown model's safe default into a definitive negative and prevent the
+    caller from consulting a live probe or its existing route fallback.
+    """
+    if capability not in {
+        "supports_tools",
+        "supports_vision",
+        "supports_reasoning",
+    }:
+        raise ValueError(f"Unknown model capability override: {capability}")
+    override = _explicit_model_override(provider, model)
+    if override is None or capability not in override:
+        return None
+    return bool(override[capability])
+
+
 def _default_model_override(provider: str) -> Optional[Dict[str, Any]]:
     """Return the fill-gap ``_default`` override for *provider*, or None.
 

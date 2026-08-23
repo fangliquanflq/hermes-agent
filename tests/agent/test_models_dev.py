@@ -16,6 +16,7 @@ from agent.models_dev import (
     _NotModified,
     _validate_registry,
     fetch_models_dev,
+    get_explicit_model_capability_override,
     get_model_capabilities,
     get_model_info,
     get_provider_info,
@@ -931,6 +932,28 @@ class TestModelOverrides:
         with self._setup_overrides({}):
             assert _explicit_model_override("anthropic", "claude-sonnet-4") is None
             assert _default_model_override("anthropic") is None
+
+    def test_explicit_capability_override_is_tristate(self):
+        overrides = {
+            "custom": {
+                "thinking-model": {"supports_reasoning": True},
+                "plain-model": {"supports_reasoning": False},
+                "partial-model": {"context_window": 32768},
+            },
+        }
+        with self._setup_overrides(overrides):
+            assert get_explicit_model_capability_override(
+                "custom", "thinking-model", "supports_reasoning"
+            ) is True
+            assert get_explicit_model_capability_override(
+                "custom", "plain-model", "supports_reasoning"
+            ) is False
+            assert get_explicit_model_capability_override(
+                "custom", "partial-model", "supports_reasoning"
+            ) is None
+            assert get_explicit_model_capability_override(
+                "custom", "missing-model", "supports_reasoning"
+            ) is None
 
     def test_explicit_beats_default(self):
         """Per-provider+model wins over per-provider _default."""

@@ -6893,13 +6893,93 @@ class TestMemoryNudgeCounterPersistence:
 
 
 class TestSupportsReasoningExtraBody:
-    def _make_agent(self):
+    def _make_agent(
+        self,
+        *,
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        model="",
+    ):
         agent = object.__new__(AIAgent)
-        agent.provider = "openrouter"
-        agent.base_url = "https://openrouter.ai/api/v1"
+        agent.provider = provider
+        agent.base_url = base_url
         agent._base_url_lower = agent.base_url.lower()
-        agent.model = ""
+        agent.model = model
         return agent
+
+    def test_explicit_capability_override_wins_for_compatible_routes(self):
+        with patch(
+            "agent.models_dev.get_explicit_model_capability_override",
+            return_value=True,
+        ):
+            agent = self._make_agent(
+                provider="custom",
+                base_url="https://inference.example/v1",
+                model="local-thinker",
+            )
+            assert agent._supports_reasoning_extra_body() is True
+
+        with patch(
+            "agent.models_dev.get_explicit_model_capability_override",
+            return_value=False,
+        ):
+            agent = self._make_agent(
+                provider="nous",
+                base_url="https://inference-api.nousresearch.com/v1",
+                model="plain-model",
+            )
+            assert agent._supports_reasoning_extra_body() is False
+
+    def test_absent_capability_override_preserves_route_fallback(self):
+        with patch(
+            "agent.models_dev.get_explicit_model_capability_override",
+            return_value=None,
+        ):
+            agent = self._make_agent(
+                provider="custom",
+                base_url="https://inference.example/v1",
+                model="unknown-model",
+            )
+            assert agent._supports_reasoning_extra_body() is False
+
+    @pytest.mark.parametrize("capability", [True, False])
+    def test_local_ollama_probe_is_authoritative(self, capability):
+        agent = self._make_agent(
+            provider="custom",
+            base_url="http://127.0.0.1:11435/v1",
+            model="local-model",
+        )
+        with (
+            patch(
+                "agent.models_dev.get_explicit_model_capability_override",
+                return_value=None,
+            ),
+            patch.object(
+                agent,
+                "_ollama_supports_thinking_cached",
+                return_value=capability,
+            ),
+        ):
+            assert agent._supports_reasoning_extra_body() is capability
+
+    def test_failed_local_ollama_probe_preserves_safe_fallback(self):
+        agent = self._make_agent(
+            provider="custom",
+            base_url="http://127.0.0.1:11435/v1",
+            model="local-model",
+        )
+        with (
+            patch(
+                "agent.models_dev.get_explicit_model_capability_override",
+                return_value=None,
+            ),
+            patch.object(
+                agent,
+                "_ollama_supports_thinking_cached",
+                return_value=None,
+            ),
+        ):
+            assert agent._supports_reasoning_extra_body() is False
 
     def test_xiaomi_models_are_treated_as_reasoning_capable(self):
         agent = self._make_agent()

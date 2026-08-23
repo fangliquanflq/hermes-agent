@@ -7620,10 +7620,22 @@ class AIAgent:
     def _supports_reasoning_extra_body(self) -> bool:
         """Return True when reasoning extra_body is safe to send for this route/model.
 
-        OpenRouter forwards unknown extra_body fields to upstream providers.
-        Some providers/routes reject `reasoning` with 400s, so gate it to
-        known reasoning-capable model families and direct Nous Portal.
+        An explicit per-model capability override wins. Otherwise, consult
+        authoritative route probes before retaining the existing hosted-route
+        fallbacks. Some providers reject unknown ``reasoning`` fields with a
+        400, so an absent capability signal must remain fail-closed.
         """
+        try:
+            from agent.models_dev import get_explicit_model_capability_override
+
+            override = get_explicit_model_capability_override(
+                self.provider or "", self.model or "", "supports_reasoning"
+            )
+        except Exception:
+            override = None
+        if override is not None:
+            return override
+
         if base_url_host_matches(self._base_url_lower, "nousresearch.com"):
             return True
         if base_url_host_matches(self._base_url_lower, "ai-gateway.vercel.sh"):
@@ -7642,12 +7654,19 @@ class AIAgent:
             opts = self._lmstudio_reasoning_options_cached()
             # "off-only" (or absent) means no real reasoning capability.
             return any(opt and opt != "off" for opt in opts)
-        # Ollama Cloud (and any Ollama-compatible server): the native
+        # Ollama Cloud and local/private Ollama-compatible servers: the native
         # /api/show capabilities list is authoritative — emit reasoning_effort
         # only for models that declare the "thinking" capability. deepseek-v4
         # has it; gemma3 / qwen3-coder don't. Cached per (model, base_url).
-        if base_url_host_matches(self._base_url_lower, "ollama.com"):
-            return self._ollama_supports_thinking_cached()
+        provider = (self.provider or "").strip().lower()
+        if (
+            provider == "ollama"
+            or base_url_host_matches(self._base_url_lower, "ollama.com")
+            or is_local_endpoint(self.base_url or "")
+        ):
+            ollama_capability = self._ollama_supports_thinking_cached()
+            if ollama_capability is not None:
+                return ollama_capability
         if not self._is_openrouter_url():
             return False
         if base_url_host_matches(self._base_url_lower, "api.mistral.ai"):
@@ -7726,7 +7745,7 @@ class AIAgent:
         cache[key] = (opts, _time.monotonic())
         return opts
 
-    def _ollama_supports_thinking_cached(self) -> bool:
+    def _ollama_supports_thinking_cached(self) -> Optional[bool]:
         """Probe Ollama's ``/api/show`` capabilities once per (model, base_url).
 
         Returns True only when the model declares the ``thinking`` capability.
@@ -7746,16 +7765,24 @@ class AIAgent:
             supported, ts = cached
             # Definitive True/False → permanent. Unknown (None) → 60s TTL.
             if supported is not None or (_time.monotonic() - ts) < 60:
-                return bool(supported)
+                return supported
         try:
             from hermes_cli.models import ollama_model_supports_thinking
+            kwargs = {}
+            if is_local_endpoint(self.base_url or ""):
+                # This gate may also see non-Ollama local OpenAI endpoints.
+                # Keep the one-time compatibility probe bounded tightly.
+                kwargs["timeout"] = 0.5
             supported = ollama_model_supports_thinking(
-                self.model, self.base_url, getattr(self, "api_key", "")
+                self.model,
+                self.base_url,
+                getattr(self, "api_key", ""),
+                **kwargs,
             )
         except Exception:
             supported = None
         cache[key] = (supported, _time.monotonic())
-        return bool(supported)
+        return supported
 
     def _resolve_lmstudio_summary_reasoning_effort(self) -> Optional[str]:
         """Resolve a safe top-level ``reasoning_effort`` for LM Studio.
