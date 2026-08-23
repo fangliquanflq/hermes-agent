@@ -4,7 +4,7 @@ import { delimiter, join } from 'node:path'
 
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { resolveEditor } from './editor.js'
+import { readStableEditorFile, resolveEditor } from './editor.js'
 
 const exe = (dir: string, name: string): string => {
   const path = join(dir, name)
@@ -70,5 +70,76 @@ describe('resolveEditor', () => {
 
   it('uses notepad.exe on Windows when no env override', () => {
     expect(resolveEditor({ PATH: dir }, 'win32')).toEqual(['notepad.exe'])
+  })
+})
+
+interface StableReadStep {
+  at: number
+  content?: string
+  fail?: boolean
+}
+
+const stableReadHarness = (initial: string, steps: StableReadStep[] = []) => {
+  let elapsed = 0
+  let content = initial
+  let fail = false
+
+  return {
+    options: {
+      now: () => elapsed,
+      read: async () => {
+        if (fail) {
+          fail = false
+          throw new Error('temporary read failure')
+        }
+
+        return content
+      },
+      wait: async (delay: number) => {
+        elapsed += delay
+
+        for (const step of steps.filter(candidate => candidate.at === elapsed)) {
+          content = step.content ?? content
+          fail = step.fail ?? false
+        }
+      }
+    },
+    elapsed: () => elapsed
+  }
+}
+
+describe('readStableEditorFile', () => {
+  it('waits for a delayed save and returns its stable contents', async () => {
+    const harness = stableReadHarness('draft', [{ at: 50, content: 'final prompt' }])
+
+    await expect(readStableEditorFile('prompt.md', 'draft', harness.options)).resolves.toBe('final prompt')
+    expect(harness.elapsed()).toBe(250)
+  })
+
+  it('debounces closely spaced saves and returns the last one', async () => {
+    const harness = stableReadHarness('draft', [
+      { at: 50, content: 'partial prompt' },
+      { at: 150, content: 'final prompt' }
+    ])
+
+    await expect(readStableEditorFile('prompt.md', 'draft', harness.options)).resolves.toBe('final prompt')
+    expect(harness.elapsed()).toBe(350)
+  })
+
+  it('accepts unchanged contents after the bounded timeout', async () => {
+    const harness = stableReadHarness('draft')
+
+    await expect(readStableEditorFile('prompt.md', 'draft', harness.options)).resolves.toBe('draft')
+    expect(harness.elapsed()).toBe(2_000)
+  })
+
+  it('retries transient read failures while waiting for stability', async () => {
+    const harness = stableReadHarness('draft', [
+      { at: 50, content: 'final prompt' },
+      { at: 100, fail: true }
+    ])
+
+    await expect(readStableEditorFile('prompt.md', 'draft', harness.options)).resolves.toBe('final prompt')
+    expect(harness.elapsed()).toBe(250)
   })
 })
