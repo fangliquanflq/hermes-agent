@@ -267,20 +267,34 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
 
     The scheduler tick loop normally lives in ``hermes gateway run`` — but the
     desktop app spawns a ``hermes dashboard`` backend, not a gateway, so a cron
-    a user creates in the app would never fire. We run the resolved cron
-    scheduler provider here (no live adapters; delivery falls back to the
-    per-platform send path).
+    a user creates in the app would never fire. The built-in provider covers
+    every local profile because Bot Mode routines may belong to profiles that
+    have no resident backend of their own. External providers retain their
+    normal process-level contract. There are no live adapters; delivery falls
+    back to the per-platform send path.
 
     Cross-process safe: the built-in provider's ``cron.scheduler.tick`` takes
     the ``cron/.tick.lock`` file lock, so this never double-fires alongside a
     real gateway on the same HERMES_HOME — whichever process grabs the lock
     first wins the tick.
     """
-    from cron.scheduler_provider import resolve_cron_scheduler
+    from cron.scheduler_provider import InProcessCronScheduler, resolve_cron_scheduler
 
     provider = resolve_cron_scheduler()
+    start_kwargs: Dict[str, Any] = {"interval": interval}
+    if isinstance(provider, InProcessCronScheduler):
+        from hermes_cli.profiles import profiles_to_serve
+
+        profile_homes = profiles_to_serve(multiplex=True)
+        start_kwargs["profile_homes"] = profile_homes
+        _log.info(
+            "Desktop cron scheduler will tick %d local profile(s): %s",
+            len(profile_homes),
+            [name for name, _home in profile_homes],
+        )
+
     _log.info("Desktop cron scheduler started (provider=%s, interval=%ds)", provider.name, interval)
-    provider.start(stop_event, interval=interval)
+    provider.start(stop_event, **start_kwargs)
 
 
 def _warm_gateway_module() -> None:

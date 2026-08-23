@@ -101,6 +101,73 @@ def test_desktop_ticker_calls_tick_then_stops():
     assert calls[0].get("sync") is False
 
 
+def test_desktop_builtin_ticker_serves_all_local_profiles(tmp_path, monkeypatch):
+    """The resident Desktop backend owns cron for every local Bot profile."""
+    from cron.scheduler_provider import InProcessCronScheduler
+    from hermes_cli.web_server import _start_desktop_cron_ticker
+
+    homes = [
+        ("default", tmp_path / "default"),
+        ("reader", tmp_path / "profiles" / "reader"),
+    ]
+    captured = {}
+
+    monkeypatch.setattr(
+        "cron.scheduler_provider.resolve_cron_scheduler",
+        lambda: InProcessCronScheduler(),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profiles_to_serve",
+        lambda *, multiplex: homes if multiplex else [],
+    )
+    monkeypatch.setattr(
+        InProcessCronScheduler,
+        "start",
+        lambda self, stop_event, **kwargs: captured.update(kwargs),
+    )
+
+    _start_desktop_cron_ticker(threading.Event(), interval=17)
+
+    assert captured == {"interval": 17, "profile_homes": homes}
+
+
+def test_desktop_external_ticker_keeps_provider_start_contract(monkeypatch):
+    """Profile multiplexing remains an internal built-in-provider detail."""
+    from cron.scheduler_provider import CronScheduler
+    from hermes_cli.web_server import _start_desktop_cron_ticker
+
+    captured = {}
+
+    class ExternalScheduler(CronScheduler):
+        @property
+        def name(self):
+            return "external"
+
+        def start(self, stop_event, *, adapters=None, loop=None, interval=60):
+            captured.update(
+                adapters=adapters,
+                loop=loop,
+                interval=interval,
+            )
+
+    monkeypatch.setattr(
+        "cron.scheduler_provider.resolve_cron_scheduler",
+        lambda: ExternalScheduler(),
+    )
+
+    def fail_profile_enumeration(**kwargs):
+        raise AssertionError("external providers must not enumerate local profiles")
+
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profiles_to_serve",
+        fail_profile_enumeration,
+    )
+
+    _start_desktop_cron_ticker(threading.Event(), interval=23)
+
+    assert captured == {"adapters": None, "loop": None, "interval": 23}
+
+
 # ── Phase 1: CronScheduler ABC + InProcessCronScheduler ──────────────────────
 
 
