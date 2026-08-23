@@ -98,8 +98,9 @@ _TOOL_SCOPED_EVENTS = {"pre_tool_call", "post_tool_call"}
 # kwargs promoted to top-level payload keys (mirrors shell hooks wire).
 _TOP_LEVEL_PAYLOAD_KEYS = {"tool_name", "args", "session_id", "parent_session_id"}
 
-# (event, url) pairs already wired to the plugin manager in this process.
-_registered: Set[Tuple[str, str]] = set()
+# (plugin-manager scope, event, url) entries already wired in this process.
+# Distinct multiplexed profiles may intentionally use the same endpoint.
+_registered: Set[Tuple[str, str, str]] = set()
 _registered_lock = threading.Lock()
 
 _delivery_queue: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue(
@@ -182,13 +183,14 @@ def register_from_config(cfg: Optional[Dict[str, Any]]) -> List[WebhookTarget]:
     from hermes_cli.plugins import get_plugin_manager
 
     manager = get_plugin_manager()
+    manager_scope = manager.scope_key
 
     registered: List[WebhookTarget] = []
     with _registered_lock:
         for target in targets:
             wired_any = False
             for event in target.events:
-                key = (event, target.url)
+                key = (manager_scope, event, target.url)
                 if key in _registered:
                     continue
                 manager._hooks.setdefault(event, []).append(

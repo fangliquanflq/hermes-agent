@@ -182,13 +182,11 @@ _BLOCKING_EVENTS = frozenset({"pre_tool_call"})
 _STDERR_MESSAGE_LIMIT = 400
 
 
-# (event, matcher, command) triples that have been wired to the plugin
-# manager in the current process.  Matcher is part of the key because
-# the same script can legitimately register for different matchers under
-# the same event (e.g. one entry per tool the user wants to gate).
-# Second registration attempts for the exact same triple become no-ops
-# so the CLI and gateway can both call register_from_config() safely.
-_registered: Set[Tuple[str, Optional[str], str]] = set()
+# (plugin-manager scope, event, matcher, command) entries wired in this
+# process. Matcher is part of the key because one script can legitimately
+# gate different tools. Scope keeps CLI/gateway registration idempotent for
+# one profile without suppressing identical hooks in multiplexed profiles.
+_registered: Set[Tuple[str, str, Optional[str], str]] = set()
 _registered_lock = threading.Lock()
 
 # Intra-process lock for allowlist read-modify-write on platforms that
@@ -289,13 +287,14 @@ def register_from_config(
     from hermes_cli.plugins import get_plugin_manager
 
     manager = get_plugin_manager()
+    manager_scope = manager.scope_key
 
     # Idempotence + allowlist read happen under the lock; the TTY
     # prompt runs outside so other threads aren't parked on a blocking
     # input().  Mutation re-takes the lock with a defensive idempotence
     # re-check in case two callers ever race through the prompt.
     for spec in specs:
-        key = (spec.event, spec.matcher, spec.command)
+        key = (manager_scope, spec.event, spec.matcher, spec.command)
         with _registered_lock:
             if key in _registered:
                 continue
@@ -352,9 +351,14 @@ def re_register_config_hooks() -> None:
     Commands already allowlisted stay allowlisted, so this never re-prompts
     at a TTY for hooks the user previously approved.
     """
-    with _registered_lock:
-        _registered.clear()
     from hermes_cli.config import load_config
+    from hermes_cli.plugins import get_plugin_manager
+
+    manager_scope = get_plugin_manager().scope_key
+    with _registered_lock:
+        _registered.difference_update(
+            key for key in _registered if key[0] == manager_scope
+        )
 
     register_from_config(load_config())
 

@@ -3762,6 +3762,25 @@ def _load_gateway_runtime_config() -> dict:
     return expanded if isinstance(expanded, dict) else {}
 
 
+def _register_configured_hooks(config: dict) -> None:
+    """Wire config-owned hooks for the active Hermes-home scope."""
+    try:
+        from agent.shell_hooks import register_from_config
+
+        register_from_config(config, accept_hooks=False)
+    except Exception:
+        logger.debug("shell-hook registration failed", exc_info=True)
+
+    try:
+        from agent.outbound_webhooks import (
+            register_from_config as register_outbound_webhooks,
+        )
+
+        register_outbound_webhooks(config)
+    except Exception:
+        logger.debug("outbound-webhook registration failed", exc_info=True)
+
+
 def _resolve_gateway_model(config: dict | None = None) -> str:
     """Read model from config.yaml — single source of truth.
 
@@ -12770,17 +12789,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Failures are logged but must never block gateway startup.
         try:
             from hermes_cli.config import load_config
-            from agent.shell_hooks import register_from_config
-            _hooks_cfg = load_config()
-            register_from_config(_hooks_cfg, accept_hooks=False)
 
-            from agent.outbound_webhooks import (
-                register_from_config as register_outbound_webhooks,
-            )
-            register_outbound_webhooks(_hooks_cfg)
+            _register_configured_hooks(load_config())
         except Exception:
             logger.debug(
-                "shell-hook registration failed at gateway startup",
+                "config-hook registration failed at gateway startup",
                 exc_info=True,
             )
 
@@ -15445,6 +15458,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from hermes_cli.plugins import discover_plugins
 
             discover_plugins()
+            _register_configured_hooks(profile_runtime_cfg)
             profile_cfg = load_gateway_config()
             violation = _own_policy_open_startup_violation(profile_cfg)
         self._snapshot_profile_busy_modes(profile_name, profile_runtime_cfg)

@@ -277,6 +277,76 @@ class TestSecondaryProfileFatalRecovery:
 class TestSecondaryProfileConfigHandling:
     """Secondary config errors degrade only when the profile is safe to skip."""
 
+    @pytest.mark.asyncio
+    async def test_secondary_registers_profile_scoped_config_hooks(
+        self, tmp_path, monkeypatch
+    ):
+        from agent import outbound_webhooks, shell_hooks
+        from gateway.run import _profile_runtime_scope
+        from hermes_cli import plugins
+
+        default_home = tmp_path / "default"
+        secondary_home = tmp_path / "reviewer"
+        default_home.mkdir()
+        secondary_home.mkdir()
+        config_text = (
+            "hooks_auto_accept: true\n"
+            "hooks:\n"
+            "  pre_tool_call:\n"
+            "    - matcher: write_file\n"
+            "      command: same-hook-command\n"
+            "  outbound:\n"
+            "    - url: https://example.invalid/hook\n"
+            "      events: [on_session_end]\n"
+        )
+        (secondary_home / "config.yaml").write_text(config_text, encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(default_home))
+
+        plugins._reset_plugin_managers_for_tests()
+        shell_hooks.reset_for_tests()
+        outbound_webhooks.reset_for_tests()
+        try:
+            default_cfg = {
+                "hooks_auto_accept": True,
+                "hooks": {
+                    "pre_tool_call": [
+                        {"matcher": "write_file", "command": "same-hook-command"}
+                    ],
+                    "outbound": [
+                        {
+                            "url": "https://example.invalid/hook",
+                            "events": ["on_session_end"],
+                        }
+                    ],
+                },
+            }
+            shell_hooks.register_from_config(default_cfg)
+            outbound_webhooks.register_from_config(default_cfg)
+            default_manager = plugins.get_plugin_manager()
+
+            runner = _secondary_recovery_runner()
+            monkeypatch.setattr(
+                "gateway.config.load_gateway_config", lambda: GatewayConfig()
+            )
+            monkeypatch.setattr("hermes_cli.plugins.discover_plugins", lambda: None)
+
+            assert await runner._start_one_profile_adapters(
+                "reviewer", secondary_home, {}
+            ) == 0
+
+            with _profile_runtime_scope(secondary_home):
+                secondary_manager = plugins.get_plugin_manager()
+
+            assert secondary_manager is not default_manager
+            assert len(default_manager._hooks["pre_tool_call"]) == 1
+            assert len(secondary_manager._hooks["pre_tool_call"]) == 1
+            assert len(default_manager._hooks["on_session_end"]) == 1
+            assert len(secondary_manager._hooks["on_session_end"]) == 1
+        finally:
+            plugins._reset_plugin_managers_for_tests()
+            shell_hooks.reset_for_tests()
+            outbound_webhooks.reset_for_tests()
+
 
     @pytest.mark.asyncio
     async def test_secondary_reports_all_port_binding_platforms(self, monkeypatch):
