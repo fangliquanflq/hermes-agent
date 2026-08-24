@@ -408,14 +408,41 @@ class TestManualBackendRespawn:
              patch.object(live, "_get_pid_cgroup_path", return_value=None), \
              patch.object(live, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(live, "_dashboard_cmdline_for_pid", return_value=argv), \
-             patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
+             patch("hermes_cli.dashboard_procs._hermes_env_for_pid", return_value=None), \
              patch.object(live, "_respawn_dashboard_processes", return_value=[]) as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
             _kill_stale_dashboard_processes(restart_managed=True)
 
-        respawn.assert_called_once_with([argv])
+        respawn.assert_called_once_with([(argv, None)])
         assert "when you're ready" not in capsys.readouterr().out
+
+    @pytest.mark.macos_only
+    def test_respawn_preserves_foreign_hermes_home(self):
+        """A fixed-port backend must not inherit the updater's Hermes home."""
+        live = self._live()
+        argv = ["hermes", "serve", "--port", "9118"]
+        foreign_home = "/home/u/.hermes-sidecar"
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError
+
+        with patch.object(live, "_restart_managed_dashboard_service", return_value=False), \
+             patch.object(live, "_find_stale_dashboard_pids", return_value=[6002]), \
+             patch.object(live, "_get_pid_cgroup_path", return_value=None), \
+             patch.object(live, "_get_systemd_service_for_pid", return_value=None), \
+             patch.object(live, "_dashboard_cmdline_for_pid", return_value=argv), \
+             patch("hermes_cli.dashboard_procs._hermes_env_for_pid",
+                   return_value={"HERMES_HOME": foreign_home}), \
+             patch.object(live, "_respawn_dashboard_processes", return_value=[]) as respawn, \
+             patch("os.kill", side_effect=fake_kill), \
+             patch("time.sleep"):
+            _kill_stale_dashboard_processes(restart_managed=True)
+
+        respawn.assert_called_once_with([
+            (argv, {"HERMES_HOME": foreign_home}),
+        ])
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX cmdline capture + respawn")
     def test_port_zero_serves_killed_without_respawn(self, capsys):
@@ -436,7 +463,7 @@ class TestManualBackendRespawn:
              patch.object(live, "_get_pid_cgroup_path", return_value=None), \
              patch.object(live, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(live, "_dashboard_cmdline_for_pid", return_value=argv), \
-             patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
+             patch("hermes_cli.dashboard_procs._hermes_env_for_pid", return_value=None), \
              patch.object(live, "_respawn_dashboard_processes") as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
@@ -463,13 +490,13 @@ class TestManualBackendRespawn:
              patch.object(live, "_get_pid_cgroup_path", return_value=None), \
              patch.object(live, "_get_systemd_service_for_pid", return_value=None), \
              patch.object(live, "_dashboard_cmdline_for_pid", return_value=argv), \
-             patch("hermes_cli.dashboard_procs._hermes_home_for_pid", return_value=None), \
+             patch("hermes_cli.dashboard_procs._hermes_env_for_pid", return_value=None), \
              patch.object(live, "_respawn_dashboard_processes", return_value=[]) as respawn, \
              patch("os.kill", side_effect=fake_kill), \
              patch("time.sleep"):
             _kill_stale_dashboard_processes(restart_managed=True)
 
-        respawn.assert_called_once_with([argv])
+        respawn.assert_called_once_with([(argv, None)])
         assert "when you're ready" not in capsys.readouterr().out
 
     def test_respawn_adds_no_open_to_dashboard_commands(self, tmp_path, monkeypatch):
@@ -484,8 +511,8 @@ class TestManualBackendRespawn:
 
         with patch.object(live.subprocess, "Popen", _FakePopen):
             failed = live._respawn_dashboard_processes([
-                ["hermes", "dashboard", "--port", "8300"],
-                ["hermes", "serve", "--host", "0.0.0.0"],
+                (["hermes", "dashboard", "--port", "8300"], None),
+                (["hermes", "serve", "--host", "0.0.0.0"], None),
             ])
 
         assert failed == []
@@ -497,11 +524,38 @@ class TestManualBackendRespawn:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
 
         with patch.object(live.subprocess, "Popen", side_effect=OSError("no such file")):
-            failed = live._respawn_dashboard_processes([["hermes", "serve"]])
+            failed = live._respawn_dashboard_processes([(["hermes", "serve"], None)])
 
         assert failed == [["hermes", "serve"]]
         out = capsys.readouterr().out
         assert "✗ failed to restart" in out
+
+    def test_respawn_replaces_updater_hermes_environment(self, tmp_path, monkeypatch):
+        live = self._live()
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "updater-home"))
+        monkeypatch.setenv("HERMES_WORKSPACE", "updater-workspace")
+        monkeypatch.setenv("NON_HERMES_SENTINEL", "preserved")
+        original_env = {
+            "HERMES_HOME": str(tmp_path / "sidecar-home"),
+            "HERMES_DASHBOARD_SESSION_TOKEN": "pinned-token",
+        }
+        spawned: list[dict] = []
+
+        class _FakePopen:
+            def __init__(self, _cmd, **kwargs):
+                spawned.append(kwargs)
+
+        with patch.object(live.subprocess, "Popen", _FakePopen):
+            failed = live._respawn_dashboard_processes([
+                (["hermes", "serve", "--port", "9118"], original_env),
+            ])
+
+        assert failed == []
+        child_env = spawned[0]["env"]
+        assert child_env["HERMES_HOME"] == original_env["HERMES_HOME"]
+        assert child_env["HERMES_DASHBOARD_SESSION_TOKEN"] == "pinned-token"
+        assert "HERMES_WORKSPACE" not in child_env
+        assert child_env["NON_HERMES_SENTINEL"] == "preserved"
 
 
 class TestFilterDashboardRespawnCandidates:

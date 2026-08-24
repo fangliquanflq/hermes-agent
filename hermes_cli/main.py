@@ -8442,12 +8442,16 @@ def _dashboard_cmdline_for_pid(pid: int) -> list[str] | None:
         return None
 
 
-def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
+def _respawn_dashboard_processes(
+    commands: list[tuple[list[str], dict[str, str] | None]],
+) -> list[list[str]]:
     """Best-effort respawn of manually-started dashboards after ``hermes update``.
 
     Spawns each recovered argv detached (new session, output to the profile's
-    ``logs/dashboard-restart.log``).  Returns the commands that failed to
-    spawn; the caller prints the manual hint for those.
+    ``logs/dashboard-restart.log``).  When the killed process environment was
+    readable, its exact ``HERMES_*`` subset replaces the updater's values.
+    Returns the commands that failed to spawn; the caller prints the manual
+    hint for those.
 
     Callers must pre-filter via ``_filter_dashboard_respawn_candidates`` so
     Desktop ``serve|dashboard --port 0`` backends are not replayed and
@@ -8463,15 +8467,24 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
     except OSError:
         pass
 
-    for command in commands:
+    for command, hermes_env in commands:
         try:
             # Keep restarted dashboards headless; reopening a browser after a
             # background update is noisy and fails in SSH/headless sessions.
             if "dashboard" in command and "--no-open" not in command:
                 command = [*command, "--no-open"]
+            child_env = None
+            if hermes_env is not None:
+                child_env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith("HERMES_")
+                }
+                child_env.update(hermes_env)
             with open(log_path, "ab") as log_f:
                 subprocess.Popen(
                     command,
+                    env=child_env,
                     stdin=subprocess.DEVNULL,
                     stdout=log_f,
                     stderr=subprocess.STDOUT,

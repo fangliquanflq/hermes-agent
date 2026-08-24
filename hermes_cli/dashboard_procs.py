@@ -146,24 +146,34 @@ def _scan_dashboard_processes(
     return dashboard_processes
 
 
-def _hermes_home_for_pid(pid: int) -> str | None:
-    """Best-effort ``HERMES_HOME`` from *pid*'s environment."""
+def _hermes_env_for_pid(pid: int) -> dict[str, str] | None:
+    """Best-effort snapshot of *pid*'s ``HERMES_*`` environment."""
     try:
         import psutil
 
-        home = psutil.Process(pid).environ().get("HERMES_HOME")
-        if home:
-            return home
+        environ = psutil.Process(pid).environ()
+        return {key: value for key, value in environ.items() if key.startswith("HERMES_")}
     except Exception:
         pass
     try:
         raw = Path(f"/proc/{pid}/environ").read_bytes()
     except (OSError, PermissionError):
         return None
+    environ: dict[str, str] = {}
     for part in raw.split(b"\x00"):
-        if part.startswith(b"HERMES_HOME="):
-            return part.split(b"=", 1)[1].decode("utf-8", errors="replace") or None
-    return None
+        if not part.startswith(b"HERMES_") or b"=" not in part:
+            continue
+        key, value = part.split(b"=", 1)
+        environ[key.decode("utf-8", errors="replace")] = value.decode(
+            "utf-8", errors="replace"
+        )
+    return environ
+
+
+def _hermes_home_for_pid(pid: int) -> str | None:
+    """Best-effort ``HERMES_HOME`` from *pid*'s environment."""
+    environ = _hermes_env_for_pid(pid)
+    return environ.get("HERMES_HOME") if environ is not None else None
 
 
 def _is_ephemeral_port_zero_backend(argv: list[str]) -> bool:
@@ -365,6 +375,7 @@ def _kill_stale_dashboard_processes(
     pid_service: dict[int, str | None] = {}
     pid_cmdline: dict[int, list[str]] = {}
     pid_home: dict[int, str | None] = {}
+    pid_env: dict[int, dict[str, str] | None] = {}
     if restart_managed and sys.platform != "win32":
         for pid in pids:
             cg_path = _m()._get_pid_cgroup_path(pid)
@@ -378,7 +389,9 @@ def _kill_stale_dashboard_processes(
                 cmdline = _m()._dashboard_cmdline_for_pid(pid)
                 if cmdline:
                     pid_cmdline[pid] = cmdline
-                    pid_home[pid] = _hermes_home_for_pid(pid)
+                    pid_env[pid] = _hermes_env_for_pid(pid)
+                    if pid_env[pid] is not None:
+                        pid_home[pid] = pid_env[pid].get("HERMES_HOME")
 
         if already_restarted_units:
             # Already handled directly by the caller (e.g. hermes update's
@@ -501,7 +514,21 @@ def _kill_stale_dashboard_processes(
 
         respawn_cmds = _filter_dashboard_respawn_candidates(respawn_candidates)
         if respawn_cmds:
-            failed_cmds = _m()._respawn_dashboard_processes(respawn_cmds)
+            respawn_specs = [
+                (
+                    command,
+                    next(
+                        (
+                            pid_env.get(pid)
+                            for pid, captured in pid_cmdline.items()
+                            if captured == command
+                        ),
+                        None,
+                    ),
+                )
+                for command in respawn_cmds
+            ]
+            failed_cmds = _m()._respawn_dashboard_processes(respawn_specs)
             if failed_cmds:
                 unrecovered.extend(p for p in killed if pid_cmdline.get(p) in failed_cmds)
 
