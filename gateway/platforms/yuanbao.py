@@ -42,6 +42,8 @@ import sys
 
 import httpx
 
+from agent.secret_scope import UnscopedSecretError, get_secret
+
 try:
     import websockets
     import websockets.exceptions
@@ -97,6 +99,15 @@ from gateway.platforms.yuanbao_proto import (
     next_seq_no,
 )
 from gateway.session import build_session_key
+
+
+def _get_scoped_secret(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read profile-scoped config, preserving default-profile startup."""
+    try:
+        return get_secret(name, default)
+    except UnscopedSecretError:
+        return os.getenv(name, default)
+
 
 logger = logging.getLogger(__name__)
 
@@ -1282,9 +1293,9 @@ class AccessPolicy:
         self._group_allow_from = group_allow_from
 
     def _open_dm_opted_in(self) -> bool:
-        if os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}:
+        if _get_scoped_secret("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}:
             return True
-        return os.getenv("YUANBAO_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
+        return _get_scoped_secret("YUANBAO_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
 
     def is_dm_allowed(self, sender_id: str) -> bool:
         """Strict DM authorization — pairing does not imply access."""
@@ -4946,23 +4957,23 @@ class YuanbaoAdapter(BasePlatformAdapter):
         # ------------------------------------------------------------------
         dm_policy: str = (
             _extra.get("dm_policy")
-            or os.getenv("YUANBAO_DM_POLICY", "pairing")
+            or _get_scoped_secret("YUANBAO_DM_POLICY", "pairing")
         ).strip().lower()
 
         _dm_allow_from_raw: str = (
             _extra.get("dm_allow_from")
-            or os.getenv("YUANBAO_DM_ALLOW_FROM", "")
+            or _get_scoped_secret("YUANBAO_DM_ALLOW_FROM", "")
         )
         dm_allow_from: list[str] = [x.strip() for x in _dm_allow_from_raw.split(",") if x.strip()]
 
         group_policy: str = (
             _extra.get("group_policy")
-            or os.getenv("YUANBAO_GROUP_POLICY", "pairing")
+            or _get_scoped_secret("YUANBAO_GROUP_POLICY", "pairing")
         ).strip().lower()
 
         _group_allow_from_raw: str = (
             _extra.get("group_allow_from")
-            or os.getenv("YUANBAO_GROUP_ALLOW_FROM", "")
+            or _get_scoped_secret("YUANBAO_GROUP_ALLOW_FROM", "")
         )
         group_allow_from: list[str] = [x.strip() for x in _group_allow_from_raw.split(",") if x.strip()]
 

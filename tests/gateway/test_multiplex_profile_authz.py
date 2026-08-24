@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agent import secret_scope
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.session import SessionSource
 
@@ -132,3 +133,134 @@ def test_secondary_open_policy_fails_startup_guard(monkeypatch):
     assert violation is not None
     assert "wecom" in violation
     assert "open policy" in violation
+
+
+@pytest.fixture()
+def multiplex_scope():
+    previous = secret_scope.is_multiplex_active()
+    secret_scope.set_multiplex_active(True)
+    try:
+        yield
+    finally:
+        secret_scope.set_multiplex_active(previous)
+
+
+def test_secondary_adapter_authorization_reads_its_profile_scope(
+    multiplex_scope, monkeypatch
+):
+    """Each own-policy adapter must snapshot the secondary profile's authz."""
+    from gateway.platforms.signal import SignalAdapter
+    from gateway.platforms.weixin import WeixinAdapter
+    from gateway.platforms.yuanbao import YuanbaoAdapter
+    from plugins.platforms.wecom.adapter import WeComAdapter
+
+    environ = {
+        "WEIXIN_DM_POLICY": "disabled",
+        "WEIXIN_ALLOWED_USERS": "default-user",
+        "WEIXIN_GROUP_POLICY": "disabled",
+        "WEIXIN_GROUP_ALLOWED_USERS": "default-group",
+        "YUANBAO_DM_POLICY": "disabled",
+        "YUANBAO_DM_ALLOW_FROM": "default-user",
+        "YUANBAO_GROUP_POLICY": "disabled",
+        "YUANBAO_GROUP_ALLOW_FROM": "default-group",
+        "SIGNAL_ALLOWED_USERS": "default-user",
+        "SIGNAL_GROUP_ALLOWED_USERS": "default-group",
+        "WECOM_DM_POLICY": "disabled",
+        "WECOM_ALLOWED_USERS": "default-user",
+        "WECOM_GROUP_POLICY": "disabled",
+    }
+    scoped = {
+        "WEIXIN_DM_POLICY": "allowlist",
+        "WEIXIN_ALLOWED_USERS": "secondary-user",
+        "WEIXIN_GROUP_POLICY": "allowlist",
+        "WEIXIN_GROUP_ALLOWED_USERS": "secondary-group",
+        "YUANBAO_DM_POLICY": "allowlist",
+        "YUANBAO_DM_ALLOW_FROM": "secondary-user",
+        "YUANBAO_GROUP_POLICY": "allowlist",
+        "YUANBAO_GROUP_ALLOW_FROM": "secondary-group",
+        "SIGNAL_ALLOWED_USERS": "secondary-user",
+        "SIGNAL_GROUP_ALLOWED_USERS": "secondary-group",
+        "WECOM_DM_POLICY": "allowlist",
+        "WECOM_ALLOWED_USERS": "secondary-user",
+        "WECOM_GROUP_POLICY": "allowlist",
+    }
+    for name, value in environ.items():
+        monkeypatch.setenv(name, value)
+
+    token = secret_scope.set_secret_scope(scoped)
+    try:
+        weixin = WeixinAdapter(PlatformConfig(enabled=True))
+        yuanbao = YuanbaoAdapter(PlatformConfig(enabled=True))
+        signal = SignalAdapter(PlatformConfig(enabled=True))
+        wecom = WeComAdapter(PlatformConfig(enabled=True))
+    finally:
+        secret_scope.reset_secret_scope(token)
+
+    assert weixin._dm_policy == "allowlist"
+    assert weixin._allow_from == ["secondary-user"]
+    assert weixin._group_policy == "allowlist"
+    assert weixin._group_allow_from == ["secondary-group"]
+    assert yuanbao._access_policy.dm_policy == "allowlist"
+    assert yuanbao._access_policy.is_dm_allowed("secondary-user") is True
+    assert yuanbao._access_policy.is_dm_allowed("default-user") is False
+    assert yuanbao._access_policy.group_policy == "allowlist"
+    assert yuanbao._access_policy.is_group_allowed("secondary-group") is True
+    assert yuanbao._access_policy.is_group_allowed("default-group") is False
+    assert signal.dm_allow_from == {"secondary-user"}
+    assert signal.group_allow_from == {"secondary-group"}
+    assert wecom._dm_policy == "allowlist"
+    assert wecom._allow_from == ["secondary-user"]
+    assert wecom._group_policy == "allowlist"
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "allow_all_env"),
+    [
+        ("gateway.platforms.weixin", "WeixinAdapter", "GATEWAY_ALLOW_ALL_USERS"),
+        ("gateway.platforms.weixin", "WeixinAdapter", "WEIXIN_ALLOW_ALL_USERS"),
+        ("gateway.platforms.yuanbao", "YuanbaoAdapter", "GATEWAY_ALLOW_ALL_USERS"),
+        ("gateway.platforms.yuanbao", "YuanbaoAdapter", "YUANBAO_ALLOW_ALL_USERS"),
+        ("plugins.platforms.wecom.adapter", "WeComAdapter", "GATEWAY_ALLOW_ALL_USERS"),
+        ("plugins.platforms.wecom.adapter", "WeComAdapter", "WECOM_ALLOW_ALL_USERS"),
+    ],
+)
+def test_secondary_open_policy_does_not_borrow_default_allow_all(
+    multiplex_scope, monkeypatch, module_name, class_name, allow_all_env
+):
+    """A scoped miss must not inherit the default profile's open-world opt-in."""
+    import importlib
+
+    monkeypatch.setenv(allow_all_env, "true")
+    token = secret_scope.set_secret_scope({"SOME_OTHER_KEY": "x"})
+    try:
+        adapter_cls = getattr(importlib.import_module(module_name), class_name)
+        adapter = adapter_cls(PlatformConfig(enabled=True))
+        policy_owner = getattr(adapter, "_access_policy", adapter)
+        assert policy_owner._open_dm_opted_in() is False
+    finally:
+        secret_scope.reset_secret_scope(token)
+
+
+def test_secondary_startup_guard_does_not_borrow_default_allow_all(
+    multiplex_scope, monkeypatch
+):
+    """The shared startup guard must validate the secondary profile's opt-in."""
+    from gateway.run import _own_policy_open_startup_violation
+
+    monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "true")
+    config = GatewayConfig(multiplex_profiles=True)
+    config.platforms = {
+        Platform.YUANBAO: PlatformConfig(
+            enabled=True,
+            extra={"dm_policy": "open"},
+        ),
+    }
+
+    token = secret_scope.set_secret_scope({"SOME_OTHER_KEY": "x"})
+    try:
+        violation = _own_policy_open_startup_violation(config)
+    finally:
+        secret_scope.reset_secret_scope(token)
+
+    assert violation is not None
+    assert "yuanbao" in violation

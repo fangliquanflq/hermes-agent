@@ -30,6 +30,8 @@ from urllib.parse import quote, unquote
 
 import httpx
 
+from agent.secret_scope import UnscopedSecretError, get_secret
+
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -75,6 +77,14 @@ HEALTH_CHECK_STALE_THRESHOLD = 120.0  # seconds without SSE activity before conc
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _get_scoped_secret(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read profile-scoped config, preserving default-profile startup."""
+    try:
+        return get_secret(name, default)
+    except UnscopedSecretError:
+        return os.getenv(name, default)
 
 
 def _parse_comma_list(value: str) -> List[str]:
@@ -268,7 +278,7 @@ class SignalAdapter(BasePlatformAdapter):
         self.ignore_stories = extra.get("ignore_stories", True)
 
         # Parse allowlists — group policy is derived from presence of group allowlist
-        group_allowed_str = os.getenv("SIGNAL_GROUP_ALLOWED_USERS", "")
+        group_allowed_str = _get_scoped_secret("SIGNAL_GROUP_ALLOWED_USERS", "")
         self.group_allow_from = set(_parse_comma_list(group_allowed_str))
 
         # Mention filter — only respond in groups when the bot account is @mentioned.
@@ -285,7 +295,7 @@ class SignalAdapter(BasePlatformAdapter):
         # every inbound DM from any contact gets a 👀 reaction).
         # "*" means all users allowed (open mode); empty means no restriction
         # recorded at adapter level (run.py still enforces auth separately).
-        dm_allowed_str = os.getenv("SIGNAL_ALLOWED_USERS", "*")
+        dm_allowed_str = _get_scoped_secret("SIGNAL_ALLOWED_USERS", "*")
         self.dm_allow_from = set(_parse_comma_list(dm_allowed_str))
 
         # HTTP client
