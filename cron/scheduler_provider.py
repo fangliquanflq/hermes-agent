@@ -22,6 +22,7 @@ from __future__ import annotations
 import inspect
 import threading
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 # Cap for the exponential tick backoff applied while consecutive ticks fail
@@ -656,9 +657,22 @@ class InProcessCronScheduler(CronScheduler):
             [p[0] if isinstance(p, tuple) else p for p in profile_homes],
         )
 
+        removed_homes: set[Path] = set()
+
+        def _existing_profile_homes():
+            for entry in profile_homes:
+                home = Path(entry[1] if isinstance(entry, tuple) else entry)
+                if home.is_dir():
+                    yield entry, home
+                elif home not in removed_homes:
+                    removed_homes.add(home)
+                    logger.info(
+                        "Skipping removed profile home in multiplex cron ticker: %s",
+                        home,
+                    )
+
         # Recovery + initial heartbeat for every profile.
-        for entry in profile_homes:
-            home = entry[1] if isinstance(entry, tuple) else entry
+        for _entry, home in _existing_profile_homes():
             home_token = set_hermes_home_override(str(home))
             try:
                 with use_cron_store(home):
@@ -681,8 +695,7 @@ class InProcessCronScheduler(CronScheduler):
                 if can_dispatch is not None and not can_dispatch():
                     logger.debug("Cron dispatch paused while gateway drains existing work")
                 else:
-                    for entry in profile_homes:
-                        home = entry[1] if isinstance(entry, tuple) else entry
+                    for _entry, home in _existing_profile_homes():
                         home_token = set_hermes_home_override(str(home))
                         try:
                             with use_cron_store(home):
@@ -704,8 +717,7 @@ class InProcessCronScheduler(CronScheduler):
             else:
                 _tick_error = None
             # Record per-profile heartbeat after each tick cycle.
-            for entry in profile_homes:
-                home = entry[1] if isinstance(entry, tuple) else entry
+            for _entry, home in _existing_profile_homes():
                 home_token = set_hermes_home_override(str(home))
                 try:
                     with use_cron_store(home):

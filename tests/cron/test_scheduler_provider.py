@@ -640,3 +640,45 @@ def test_multiplex_ticker_ticks_each_profile_once(tmp_path, monkeypatch):
         f"Expected >= {len(profile_homes)} tick calls, got {len(tick_count)}"
 
 
+def test_multiplex_ticker_does_not_recreate_removed_profile(tmp_path, monkeypatch):
+    """A stale startup snapshot must not resurrect an archived profile home."""
+    from cron.scheduler_provider import InProcessCronScheduler
+
+    active = tmp_path / "default"
+    removed = tmp_path / "profiles" / "research"
+    for home in (active, removed):
+        (home / "cron").mkdir(parents=True)
+    archived = tmp_path / "profiles" / "_archived" / "research"
+    archived.parent.mkdir()
+    profile_homes = [("default", active), ("research", removed)]
+
+    ticked_homes = []
+
+    def _tracking_tick(*args, **kwargs):
+        from hermes_constants import get_hermes_home
+
+        home = get_hermes_home()
+        ticked_homes.append(home)
+        if home == active:
+            removed.rename(archived)
+        return 0
+
+    stop = threading.Event()
+    original_wait = stop.wait
+
+    def _stop_after_first_cycle(timeout=None):
+        stop.set()
+        return original_wait(0)
+
+    stop.wait = _stop_after_first_cycle
+    provider = InProcessCronScheduler()
+    monkeypatch.setattr(provider, "recover_interrupted", lambda: 0)
+
+    with patch("cron.scheduler.tick", side_effect=_tracking_tick):
+        provider.start(stop, interval=0, profile_homes=profile_homes)
+
+    assert ticked_homes == [active]
+    assert not removed.exists()
+    assert archived.is_dir()
+
+
