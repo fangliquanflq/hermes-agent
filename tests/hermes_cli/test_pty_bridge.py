@@ -54,6 +54,42 @@ class TestPtyBridgeSpawn:
         with pytest.raises((FileNotFoundError, OSError)):
             PtyBridge.spawn([str(tmp_path / "definitely-not-a-real-binary")])
 
+    def test_owner_path_installs_identity_drop_before_exec(self, monkeypatch):
+        import ptyprocess
+
+        from hermes_cli import process_identity
+
+        captured = {}
+        identity = process_identity.PosixIdentity(
+            uid=985,
+            gid=986,
+            groups=(986,),
+        )
+
+        class _FakeProc:
+            fd = 123
+            pid = 456
+
+        def _spawn(cls, argv, **kwargs):
+            captured.update(kwargs)
+            return _FakeProc()
+
+        monkeypatch.setattr(
+            process_identity,
+            "posix_identity_for_path",
+            lambda path: identity,
+        )
+        monkeypatch.setattr(
+            ptyprocess.PtyProcess,
+            "spawn",
+            classmethod(_spawn),
+        )
+
+        bridge = PtyBridge.spawn(["true"], owner_path="/profiles/worker")
+
+        assert bridge.pid == 456
+        assert captured["preexec_fn"] == identity.apply
+
 
 @skip_on_windows
 class TestPtyBridgeIO:

@@ -64,6 +64,80 @@ _LEDGER_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
+# POSIX child identity
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PosixIdentity:
+    """UID/GID state a privileged parent applies immediately before exec."""
+
+    uid: int
+    gid: int
+    groups: tuple[int, ...]
+
+    def apply(self) -> None:
+        """Drop supplementary groups before the primary GID and UID."""
+        os.setgroups(list(self.groups))
+        os.setgid(self.gid)
+        os.setuid(self.uid)
+
+
+def required_posix_identity(
+    *,
+    current_uid: int,
+    owner_uid: int,
+    owner_gid: int,
+    supplementary_groups: tuple[int, ...],
+) -> Optional[PosixIdentity]:
+    """Return the required owner transition, or fail when it is impossible."""
+    if current_uid == owner_uid:
+        return None
+    if current_uid != 0:
+        raise PermissionError(
+            f"profile is owned by uid {owner_uid}, but dashboard runs as uid "
+            f"{current_uid}; run the dashboard as that owner or as root"
+        )
+
+    groups = tuple(dict.fromkeys((owner_gid, *supplementary_groups)))
+    return PosixIdentity(uid=owner_uid, gid=owner_gid, groups=groups)
+
+
+def posix_identity_for_path(path: str | os.PathLike[str]) -> Optional[PosixIdentity]:
+    """Resolve the privilege transition required to write as ``path``'s owner."""
+    if os.name != "posix" or not hasattr(os, "geteuid"):
+        raise OSError("POSIX process identity is unavailable on this platform")
+
+    owner = os.stat(path)
+    current_uid = os.geteuid()
+    transition = required_posix_identity(
+        current_uid=current_uid,
+        owner_uid=owner.st_uid,
+        owner_gid=owner.st_gid,
+        supplementary_groups=(owner.st_gid,),
+    )
+    if transition is None:
+        return None
+
+    groups: tuple[int, ...] = (owner.st_gid,)
+    try:
+        import pwd
+
+        username = pwd.getpwuid(owner.st_uid).pw_name
+        groups = tuple(os.getgrouplist(username, owner.st_gid))
+    except (ImportError, KeyError, OSError):
+        # Numeric-only service accounts are valid. Their directory group is
+        # sufficient, and importantly avoids inheriting root's groups.
+        pass
+
+    return required_posix_identity(
+        current_uid=current_uid,
+        owner_uid=owner.st_uid,
+        owner_gid=owner.st_gid,
+        supplementary_groups=groups,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Install identity
 # ---------------------------------------------------------------------------
 

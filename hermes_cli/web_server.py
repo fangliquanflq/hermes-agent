@@ -16626,6 +16626,19 @@ def _resolve_chat_argv(
     return list(argv), str(cwd) if cwd else None, env
 
 
+def _chat_profile_owner_path(
+    profile: Optional[str], env: Optional[dict]
+) -> Optional[str]:
+    """Return the profile home whose owner must execute an explicitly scoped chat."""
+    requested = (profile or "").strip()
+    if not requested or requested.lower() == "current":
+        return None
+    owner_path = str((env or {}).get("HERMES_HOME") or "").strip()
+    if not owner_path:
+        raise OSError("profile-scoped chat did not resolve a profile home")
+    return owner_path
+
+
 # Hosts that mean "listen on every interface" — the server should bind to
 # them, but an in-container client must NOT dial them: dialing 0.0.0.0
 # resolves to "any local interface", which on most platforms routes through
@@ -17506,7 +17519,12 @@ async def pty_ws(ws: WebSocket) -> None:
         attach_token = f"{attach_token}\0{profile or ''}\0{registry_resume or ''}"
 
     def _spawn():
-        return PtyBridge.spawn(argv, cwd=cwd, env=env)
+        return PtyBridge.spawn(
+            argv,
+            cwd=cwd,
+            env=env,
+            owner_path=_chat_profile_owner_path(profile, env),
+        )
 
     if attach_token is None:
         # Legacy path: 1:1 socket<->PTY, killed on disconnect (unchanged).

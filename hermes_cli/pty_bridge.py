@@ -116,6 +116,7 @@ class PtyBridge:
         *,
         cwd: Optional[str] = None,
         env: Optional[dict] = None,
+        owner_path: Optional[str] = None,
         cols: int = 80,
         rows: int = 24,
     ) -> "PtyBridge":
@@ -123,7 +124,9 @@ class PtyBridge:
 
         Raises :class:`PtyUnavailableError` if the platform can't host a
         PTY.  Raises :class:`FileNotFoundError` or :class:`OSError` for
-        ordinary exec failures (missing binary, bad cwd, etc.).
+        ordinary exec failures (missing binary, bad cwd, etc.). When
+        ``owner_path`` is set, the child drops to that directory's owner or
+        fails before exec if the dashboard lacks permission to do so.
         """
         if not _PTY_AVAILABLE:
             if sys.platform.startswith("win"):
@@ -153,10 +156,18 @@ class PtyBridge:
         )
         if not spawn_env.get("TERM"):
             spawn_env["TERM"] = "xterm-256color"
+        preexec_fn = None
+        if owner_path is not None:
+            from hermes_cli.process_identity import posix_identity_for_path
+
+            identity = posix_identity_for_path(owner_path)
+            if identity is not None:
+                preexec_fn = identity.apply
         proc = ptyprocess.PtyProcess.spawn(  # type: ignore[union-attr]
             list(argv),
             cwd=cwd,
             env=spawn_env,
+            preexec_fn=preexec_fn,
             dimensions=(rows, cols),
         )
         return cls(proc)

@@ -242,3 +242,71 @@ def test_updater_ledger_rung_never_raises():
 
     with patch.object(pi, "ledger_entries", side_effect=RuntimeError("boom")):
         assert cli_main._ledger_reapable_backend_pids(_holders(200)) == []
+
+
+# ---------------------------------------------------------------------------
+# POSIX profile-owner transition
+# ---------------------------------------------------------------------------
+
+def test_root_transition_targets_profile_owner():
+    identity = pi.required_posix_identity(
+        current_uid=0,
+        owner_uid=985,
+        owner_gid=986,
+        supplementary_groups=(986, 1001),
+    )
+
+    assert identity == pi.PosixIdentity(
+        uid=985,
+        gid=986,
+        groups=(986, 1001),
+    )
+
+
+def test_matching_owner_needs_no_transition():
+    assert pi.required_posix_identity(
+        current_uid=985,
+        owner_uid=985,
+        owner_gid=986,
+        supplementary_groups=(986,),
+    ) is None
+
+
+def test_mismatched_unprivileged_process_fails_closed():
+    with pytest.raises(PermissionError, match="owned by uid 985"):
+        pi.required_posix_identity(
+            current_uid=1000,
+            owner_uid=985,
+            owner_gid=986,
+            supplementary_groups=(986,),
+        )
+
+
+def test_identity_apply_drops_groups_before_gid_and_uid(monkeypatch):
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        pi.os,
+        "setgroups",
+        lambda groups: calls.append(("groups", tuple(groups))),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pi.os,
+        "setgid",
+        lambda gid: calls.append(("gid", gid)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pi.os,
+        "setuid",
+        lambda uid: calls.append(("uid", uid)),
+        raising=False,
+    )
+
+    pi.PosixIdentity(uid=985, gid=986, groups=(986, 1001)).apply()
+
+    assert calls == [
+        ("groups", (986, 1001)),
+        ("gid", 986),
+        ("uid", 985),
+    ]

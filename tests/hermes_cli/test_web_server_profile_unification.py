@@ -650,6 +650,25 @@ class TestProfileScopedChatPty:
         # Scoped chat must NOT attach to the dashboard's in-memory gateway.
         assert "HERMES_TUI_GATEWAY_URL" not in env
 
+    def test_explicit_profile_chat_runs_as_profile_home_owner(
+        self, isolated_profiles
+    ):
+        import hermes_cli.web_server as web_server
+
+        env = {"HERMES_HOME": str(isolated_profiles["worker_beta"])}
+
+        assert web_server._chat_profile_owner_path("worker_beta", env) == str(
+            isolated_profiles["worker_beta"]
+        )
+
+    @pytest.mark.parametrize("profile", [None, "", "current", " CURRENT "])
+    def test_current_profile_chat_keeps_dashboard_identity(self, profile):
+        import hermes_cli.web_server as web_server
+
+        assert web_server._chat_profile_owner_path(
+            profile, {"HERMES_HOME": "/launch/profile"}
+        ) is None
+
     def test_chat_argv_bridges_selected_profile_terminal_config(
         self, isolated_profiles, monkeypatch
     ):
