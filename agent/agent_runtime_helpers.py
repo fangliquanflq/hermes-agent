@@ -790,11 +790,24 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
             # content alone — collapsing image/audio blocks risks
             # mangling the attachment structure.
             if isinstance(prev_content, str) and isinstance(new_content, str):
-                prev["content"] = (
+                joined_content = (
                     (prev_content + "\n\n" + new_content)
                     if prev_content and new_content
                     else (prev_content or new_content)
                 )
+                # Timeline markers are synthetic user-role pivots. When one
+                # immediately precedes a real prompt, keep the prompt as the
+                # physical carrier so its durable row id and human-turn status
+                # survive repair. Keeping the marker instead makes the merged
+                # row synthetic and leaves edit/regenerate unable to resolve
+                # the real prompt's row id (#94486).
+                if prev.get("display_kind") and not msg.get("display_kind"):
+                    msg["content"] = joined_content
+                    drop_stale_api_content(msg)
+                    merged[-1] = msg
+                    repairs += 1
+                    continue
+                prev["content"] = joined_content
                 # Merged content invalidates the api_content sidecar (exact
                 # bytes previously sent for the pre-merge message) — drop it
                 # so replay can't substitute stale bytes.

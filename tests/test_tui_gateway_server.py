@@ -20257,6 +20257,64 @@ def test_prompt_submit_row_id_real_sessiondb_resolve_without_memory_stamps(
         server._sessions.pop(sid, None)
 
 
+def test_prompt_submit_resolves_user_row_after_model_switch_marker(
+    monkeypatch, tmp_path
+):
+    """#94486: alternation repair must keep the real prompt's durable identity."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "model-switch-rowid.db")
+    session_key = "model-switch-rowid"
+    db.create_session(session_key, "desktop")
+    messages = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply"},
+        {
+            "role": "user",
+            "content": "[System: The active model for this chat has changed to custom.]",
+            "display_kind": "model_switch",
+        },
+        {"role": "user", "content": "prompt after switch"},
+    ]
+    with db._lock:
+        db._insert_message_rows(db._conn, session_key, messages)
+        db._conn.commit()
+    prompt_row_id = messages[-1]["_row_id"]
+
+    repaired = db.get_messages_as_conversation(
+        session_key, repair_alternation=True, include_row_ids=True
+    )
+    sess = _session(history=repaired, session_key=session_key)
+    sid = "model-switch-rowid-sid"
+    server._sessions[sid] = sess
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_start_inflight_turn", lambda *a, **k: None)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": sid,
+                    "text": "edited prompt after switch",
+                    "truncate_before_row_id": prompt_row_id,
+                    "truncate_before_user_ordinal": 1,
+                    "confirm_truncate": True,
+                },
+            }
+        )
+
+        assert resp.get("error") is None, resp
+        assert [message["content"] for message in sess["history"]] == [
+            "first",
+            "reply",
+        ]
+    finally:
+        server._sessions.pop(sid, None)
+
+
 def test_prompt_submit_row_id_real_sessiondb_unknown_refuses_despite_ordinal(
     monkeypatch, tmp_path
 ):
