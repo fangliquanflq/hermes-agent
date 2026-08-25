@@ -120,6 +120,42 @@ def _make_recorder_class(captured=None, record_on_run=()):
     return _Recorder
 
 
+def _capture_review_init_kwargs(task_cfg, *, routed):
+    """Run one review fork inline and return its AIAgent constructor kwargs."""
+    import run_agent
+    import agent.background_review as bg_review
+
+    agent = _make_agent_stub(run_agent.AIAgent)
+    captured = {}
+    recorder = _make_recorder_class(captured)
+    runtime = {
+        "provider": "openrouter" if routed else agent.provider,
+        "model": "aux-cheap-model" if routed else agent.model,
+        "api_key": "test-key",
+        "base_url": None,
+        "api_mode": None,
+        "credential_pool": None,
+        "request_overrides": {},
+        "max_tokens": None,
+        "command": None,
+        "args": [],
+        "routed": routed,
+    }
+
+    with patch.object(run_agent, "AIAgent", recorder), \
+         patch.object(bg_review, "load_background_review_settings",
+                      return_value=(True, task_cfg)), \
+         patch.object(bg_review, "_resolve_review_runtime", return_value=runtime), \
+         patch("threading.Thread", _SyncThread):
+        agent._spawn_background_review(
+            messages_snapshot=[],
+            review_memory=True,
+            review_skills=False,
+        )
+
+    return captured.get("init_kwargs", {})
+
+
 def test_review_fork_inherits_parent_cached_system_prompt():
     """The review fork's _cached_system_prompt must equal the parent's byte-for-byte.
 
@@ -275,7 +311,7 @@ def test_review_fork_pins_session_start_and_session_id():
 
 
 
-def test_routed_review_fork_does_not_inherit_reasoning_config():
+def test_routed_review_fork_with_empty_effort_uses_provider_default():
     """Routed aux path: the fork must NOT inherit the parent's reasoning_config.
 
     When ``auxiliary.background_review.{provider,model}`` routes the review
@@ -287,41 +323,12 @@ def test_routed_review_fork_does_not_inherit_reasoning_config():
     provider defaults, mirroring the ``not _routed`` gate on
     ``_cached_system_prompt`` inheritance.
     """
-    import run_agent
-    import agent.background_review as bg_review
-
-    agent_stub = _make_agent_stub(run_agent.AIAgent)
-
-    captured = {}
-    _Recorder = _make_recorder_class(captured)
-
-    routed_runtime = {
-        "provider": "openrouter",
-        "model": "aux-cheap-model",
-        "api_key": "test-key",
-        "base_url": None,
-        "api_mode": None,
-        "credential_pool": None,
-        "request_overrides": {},
-        "max_tokens": None,
-        "command": None,
-        "args": [],
-        "routed": True,
-    }
-
-    with patch.object(run_agent, "AIAgent", _Recorder), \
-         patch.object(bg_review, "_resolve_review_runtime",
-                      return_value=routed_runtime), \
-         patch("threading.Thread", _SyncThread):
-        agent_stub._spawn_background_review(
-            messages_snapshot=[],
-            review_memory=True,
-            review_skills=False,
-        )
-
-    init_kwargs = captured.get("init_kwargs", {})
+    init_kwargs = _capture_review_init_kwargs(
+        {"reasoning_effort": ""}, routed=True
+    )
     assert "reasoning_config" not in init_kwargs, (
-        f"Routed review fork was passed the parent's reasoning_config "
+        "Routed review fork with an empty task-specific effort was passed a "
+        f"reasoning_config "
         f"({init_kwargs.get('reasoning_config')!r}). On the routed path the "
         "cache is cold (no parity benefit) and the parent's effort value may "
         "be invalid for the routed model/provider — it must be omitted so "
@@ -340,3 +347,45 @@ def test_routed_review_fork_does_not_inherit_reasoning_config():
             f"Routed review fork was passed parent-only kwarg {_gated!r}; "
             "cache-parity inheritance must stay behind the not-routed gate."
         )
+
+
+def test_routed_review_fork_honors_explicit_task_reasoning_effort():
+    init_kwargs = _capture_review_init_kwargs(
+        {"reasoning_effort": "xhigh"}, routed=True
+    )
+
+    assert init_kwargs["reasoning_config"] == {
+        "enabled": True,
+        "effort": "xhigh",
+    }
+
+
+def test_unrouted_review_fork_with_empty_effort_inherits_parent_config():
+    init_kwargs = _capture_review_init_kwargs(
+        {"reasoning_effort": ""}, routed=False
+    )
+
+    assert init_kwargs["reasoning_config"] == {
+        "enabled": True,
+        "effort": "medium",
+    }
+
+
+def test_invalid_task_reasoning_effort_preserves_routed_fallback(caplog):
+    init_kwargs = _capture_review_init_kwargs(
+        {"reasoning_effort": "warp-speed"}, routed=True
+    )
+
+    assert "reasoning_config" not in init_kwargs
+    assert "warp-speed" in caplog.text
+
+
+def test_explicit_task_reasoning_effort_precedes_parent_config():
+    init_kwargs = _capture_review_init_kwargs(
+        {"reasoning_effort": "low"}, routed=False
+    )
+
+    assert init_kwargs["reasoning_config"] == {
+        "enabled": True,
+        "effort": "low",
+    }

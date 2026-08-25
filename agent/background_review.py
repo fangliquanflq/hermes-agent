@@ -382,6 +382,37 @@ def _resolve_review_runtime(
         return parent
 
 
+def _resolve_review_reasoning_config(
+    agent: Any,
+    task_cfg: Optional[Dict[str, Any]],
+    *,
+    routed: bool,
+) -> tuple[bool, Optional[Dict[str, Any]]]:
+    """Resolve whether and how the review fork pins reasoning configuration.
+
+    A valid task-specific effort always wins. Without one, same-runtime forks
+    preserve the parent's request/cache parity, while routed forks omit the
+    argument so the target provider selects its default.
+    """
+    from hermes_constants import parse_reasoning_effort
+
+    task = _background_review_task_config(task_cfg)
+    raw_effort = task.get("reasoning_effort")
+    parsed = parse_reasoning_effort(raw_effort)
+    if parsed is not None:
+        return True, parsed
+    if raw_effort is not None and str(raw_effort).strip():
+        logger.warning(
+            "auxiliary.background_review.reasoning_effort %r is not a valid "
+            "level (none, minimal, low, medium, high, xhigh, max, ultra) — "
+            "ignoring",
+            raw_effort,
+        )
+    if routed:
+        return False, None
+    return True, getattr(agent, "reasoning_config", None)
+
+
 def _msg_text(m: Dict) -> str:
     c = m.get("content")
     if isinstance(c, str):
@@ -1200,19 +1231,17 @@ def _run_review_in_thread(
             if isinstance(_rt.get("command"), str) and _rt["command"]:
                 _fork_kwargs["acp_command"] = _rt["command"]
                 _fork_kwargs["acp_args"] = _rt.get("args") or []
-            # Match parent's reasoning config so the fork's ``thinking`` /
-            # ``output_config`` are byte-identical in the request body —
-            # Anthropic's cache key is namespaced by ``thinking`` presence.
-            # Same-model path only: when routed to a different aux model the
-            # cache is cold regardless (parity buys nothing) and the parent's
-            # effort vocabulary may not be valid for the routed model/provider
-            # (e.g. OpenRouter ``extra_body.reasoning.effort`` is forwarded
-            # unclamped; codex_responses passes ``max``/``ultra`` through
-            # unmapped except on gpt-5.6/xAI). Let the routed fork use
-            # provider defaults — matching the ``not _routed`` gate on
-            # _cached_system_prompt below.
+            # A valid review-specific effort wins on either runtime. Otherwise,
+            # same-model forks inherit the parent's config for request/cache
+            # parity, while routed forks omit it so the target provider keeps
+            # selecting its own default instead of receiving a potentially
+            # incompatible parent-model effort.
+            _pin_reasoning, _review_reasoning = _resolve_review_reasoning_config(
+                agent, task_cfg, routed=_routed
+            )
+            if _pin_reasoning:
+                _fork_kwargs["reasoning_config"] = _review_reasoning
             if not _routed:
-                _fork_kwargs["reasoning_config"] = getattr(agent, "reasoning_config", None)
                 # Gateway session context is appended to the parent's cached
                 # system prompt at API-call time through this field.  Preserve
                 # it on same-model forks so the complete effective system
