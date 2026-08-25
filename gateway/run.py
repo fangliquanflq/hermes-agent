@@ -841,7 +841,13 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     return redacted
 
 
-def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
+def _prepare_gateway_status_message(
+    platform: Any,
+    event_type: str,
+    message: str,
+    *,
+    interim_assistant_messages_enabled: bool = True,
+) -> Optional[str]:
     """Filter/sanitize agent status callbacks before platform delivery.
 
     Local/CLI sessions keep the raw diagnostic stream. Messaging gateway
@@ -868,6 +874,8 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
             return None
     if _looks_like_gateway_provider_error(text):
         return _gateway_provider_error_reply(text)
+    if event_type == "lifecycle" and not interim_assistant_messages_enabled:
+        return None
     return text
 
 
@@ -5316,6 +5324,9 @@ class TurnRunner:
             ctx.source.platform,
             event_type,
             message,
+            interim_assistant_messages_enabled=(
+                ctx.interim_assistant_messages_enabled
+            ),
         )
         if prepared_message is None:
             logger.debug(
