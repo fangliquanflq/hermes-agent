@@ -78,6 +78,40 @@ def test_run_one_job_success_sequence(monkeypatch):
     assert calls[-1] == ("mark", "j2", True)
 
 
+@pytest.mark.parametrize(
+    ("job", "final", "silent_marker", "delivery_error", "expected"),
+    [
+        ({"id": "delivery-visible", "deliver": "telegram"}, "report", None, None, "delivered"),
+        ({"id": "delivery-silent", "deliver": "telegram"}, "ignored", "[SILENT]", None, "suppressed"),
+        (
+            {"id": "delivery-empty", "deliver": "telegram", "no_agent": True},
+            "",
+            None,
+            None,
+            "suppressed",
+        ),
+        ({"id": "delivery-local", "deliver": "local"}, "report", None, None, "local_only"),
+        ({"id": "delivery-failed", "deliver": "telegram"}, "report", None, "send failed", "failed"),
+    ],
+)
+def test_run_one_job_persists_authoritative_delivery_outcome(
+    monkeypatch, job, final, silent_marker, delivery_error, expected
+):
+    _patch_pipeline(
+        monkeypatch,
+        final=final,
+        silent_marker_in=silent_marker,
+    )
+    if delivery_error:
+        monkeypatch.setattr(s, "_deliver_result", lambda *_a, **_kw: delivery_error)
+
+    assert s.run_one_job(job) is True
+
+    from cron.executions import latest_execution
+
+    assert latest_execution(job["id"])["delivery_outcome"] == expected
+
+
 def test_run_one_job_exception_delivers_failure_alert(monkeypatch):
     """An exception escaping the run body must not become a silent error row."""
     delivered = []
@@ -321,7 +355,7 @@ def test_run_one_job_keyboard_interrupt_skips_delivery_and_reraises(monkeypatch)
             {
                 "success": False,
                 "error": "KeyboardInterrupt",
-                "delivery_outcome": "suppressed",
+                "delivery_outcome": "skipped",
             },
         )
     ]

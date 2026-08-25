@@ -17,6 +17,7 @@ import threading
 from unittest.mock import patch
 
 from tools.cronjob_tools import (
+    _delivery_completion_notice,
     _try_dispatch_background_run,
     cronjob,
 )
@@ -56,6 +57,20 @@ def _bound_session_key(key="agent:main:telegram:dm:123"):
 
 
 class TestBackgroundDispatch:
+    def test_delivery_completion_notices_use_authoritative_outcome(self):
+        cases = [
+            ("telegram", "delivered", None, "output was delivered"),
+            ("telegram", "suppressed", None, "intentionally suppressed"),
+            ("telegram", "skipped", None, "delivery was skipped"),
+            ("origin", "not_configured", None, "no configured target resolved"),
+            ("telegram", "failed", "send failed: 502", "delivery failed: send failed: 502"),
+            ("local", "local_only", None, "output saved locally only"),
+        ]
+
+        for target, outcome, error, expected in cases:
+            notice = _delivery_completion_notice(target, outcome, error)
+            assert expected in notice
+
     def test_dispatches_and_returns_handle_immediately(self):
         """With a routable session, run claims sync then dispatches async."""
         run_started = threading.Event()
@@ -92,11 +107,15 @@ class TestBackgroundDispatch:
 
         from tools.process_registry import process_registry
 
+        def suppressed_run(_job, *, completion_result, **_kwargs):
+            completion_result["delivery_outcome"] = "suppressed"
+            return True
+
         # The runner executes on a daemon thread — the patches must stay
         # active until the completion event lands, so poll INSIDE the blocks.
         with _bound_session_key("agent:main:telegram:dm:777"):
             with patch("tools.cronjob_tools.claim_job_for_fire", side_effect=lambda jid, **kw: {**_job(jid), "fire_claim": {"by": "bg-owner"}}), \
-                 patch("cron.scheduler.run_one_job", return_value=True), \
+                 patch("cron.scheduler.run_one_job", side_effect=suppressed_run), \
                  patch("tools.cronjob_tools.get_job",
                        return_value={"last_status": "ok", "last_error": None,
                                      "next_run_at": "2026-08-07T09:00:00"}):
@@ -121,6 +140,8 @@ class TestBackgroundDispatch:
         assert found["status"] == "completed"
         assert "bg run" in (found.get("summary") or "")
         assert "Next scheduled run" in found["summary"]
+        assert "intentionally suppressed" in found["summary"]
+        assert "output was delivered" not in found["summary"]
 
     def test_failed_run_reports_error_status_in_event(self):
         import time

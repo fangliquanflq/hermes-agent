@@ -12,7 +12,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Literal, Optional, TypedDict
 
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
@@ -23,6 +23,19 @@ from hermes_time import now as _hermes_now
 EXECUTIONS_FILE: Optional[Path] = None
 MAX_TERMINAL_EXECUTIONS = 1000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
+DeliveryOutcome = Literal[
+    "delivered", "suppressed", "skipped", "failed", "not_configured", "local_only"
+]
+
+
+class RunCompletionResult(TypedDict, total=False):
+    execution_id: str
+    delivery_outcome: DeliveryOutcome
+
+
+_DELIVERY_OUTCOMES = {
+    "delivered", "suppressed", "skipped", "failed", "not_configured", "local_only"
+}
 _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
 
@@ -53,9 +66,15 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
              claimed_at TEXT NOT NULL,
              started_at TEXT,
              finished_at TEXT,
-             error TEXT
+             error TEXT,
+             delivery_outcome TEXT
            )"""
     )
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(executions)").fetchall()
+    }
+    if "delivery_outcome" not in columns:
+        conn.execute("ALTER TABLE executions ADD COLUMN delivery_outcome TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_executions_job_claimed "
         "ON executions(job_id, claimed_at DESC, id DESC)"
@@ -178,17 +197,20 @@ def mark_execution_running(execution_id: str) -> Optional[Dict[str, Any]]:
 
 def finish_execution(
     execution_id: str, *, success: bool, error: Optional[str] = None,
-    delivery_outcome: Optional[str] = None,
+    delivery_outcome: Optional[DeliveryOutcome] = None,
 ) -> Optional[Dict[str, Any]]:
     """Write a terminal result once; terminal attempts cannot be rewritten."""
+    if delivery_outcome is not None and delivery_outcome not in _DELIVERY_OUTCOMES:
+        raise ValueError(f"unsupported delivery outcome: {delivery_outcome}")
     now = _hermes_now().isoformat()
     status = "completed" if success else "failed"
     detail = None if success else (str(error) if error else "unknown failure")
     with _transaction() as conn:
         cur = conn.execute(
-            """UPDATE executions SET status=?, finished_at=?, error=?
+            """UPDATE executions
+               SET status=?, finished_at=?, error=?, delivery_outcome=?
                WHERE id=? AND status IN ('claimed','running')""",
-            (status, now, detail, execution_id),
+            (status, now, detail, delivery_outcome, execution_id),
         )
         if cur.rowcount != 1:
             return None
@@ -198,6 +220,15 @@ def finish_execution(
         ).fetchone())
     _emit_execution_state(record, delivery_outcome=delivery_outcome)
     return record
+
+
+def get_execution(execution_id: str) -> Optional[Dict[str, Any]]:
+    """Return one exact execution attempt by its immutable id."""
+    with _transaction() as conn:
+        row = conn.execute(
+            "SELECT * FROM executions WHERE id=?", (str(execution_id),)
+        ).fetchone()
+    return _record(row)
 
 
 def recover_interrupted_executions() -> int:

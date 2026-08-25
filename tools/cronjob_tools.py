@@ -885,11 +885,15 @@ def _run_claimed_job(
         adapters = getattr(runner, "adapters", None) if runner is not None else None
         gateway_loop = getattr(runner, "_gateway_loop", None) if runner is not None else None
 
+        from cron.executions import RunCompletionResult
+
+        completion_result: RunCompletionResult = {}
         try:
             try:
                 processed = run_one_job(
                     job, adapters=adapters, loop=gateway_loop,
                     extra_prompt=extra_prompt,
+                    completion_result=completion_result,
                 )
             finally:
                 _heartbeat_stop.set()
@@ -904,6 +908,8 @@ def _run_claimed_job(
             "claimed": True,
             "success": bool(processed and ok),
             "error": refreshed.get("last_error"),
+            "delivery_outcome": completion_result.get("delivery_outcome") or "skipped",
+            "delivery_error": refreshed.get("last_delivery_error"),
         }
 
     except Exception as e:
@@ -957,6 +963,30 @@ def _latest_job_output_excerpt(job_id: str, max_chars: int = 2000) -> Optional[s
         return text
     except Exception:
         return None
+
+
+def _delivery_completion_notice(
+    target: Any, outcome: Optional[str], delivery_error: Optional[str]
+) -> str:
+    """Render a manual-run notice from the scheduler's exact run outcome."""
+    target_text = str(target or "local")
+    if outcome == "delivered":
+        detail = "output was delivered to the configured target(s)"
+    elif outcome == "suppressed":
+        detail = "delivery was intentionally suppressed (silent or empty output)"
+    elif outcome == "failed":
+        bounded_error = " ".join(str(delivery_error or "").split())[:240]
+        detail = "delivery failed" + (f": {bounded_error}" if bounded_error else "")
+    elif outcome == "not_configured":
+        detail = (
+            "delivery was skipped because no configured target resolved; "
+            "output saved locally"
+        )
+    elif outcome == "local_only":
+        detail = "output saved locally only"
+    else:
+        detail = "delivery was skipped"
+    return f"Delivery target: {target_text} ({detail})"
 
 
 def _try_dispatch_background_run(
@@ -1143,11 +1173,10 @@ def _try_dispatch_background_run(
             f"Cron job '{job_name}' ({job_id}) finished its manual run.",
             f"Result: {'ok' if res.get('success') else 'FAILED'}"
             + (f" — {res.get('error')}" if res.get("error") else ""),
-            f"Delivery target: {deliver}"
-            + (
-                " (output was delivered there by the job itself)"
-                if deliver != "local"
-                else " (output saved locally only)"
+            _delivery_completion_notice(
+                deliver,
+                res.get("delivery_outcome"),
+                res.get("delivery_error"),
             ),
         ]
         if refreshed.get("next_run_at"):

@@ -39,6 +39,40 @@ def test_execution_transitions_are_durable(monkeypatch, tmp_path):
     assert persisted == [completed]
 
 
+def test_execution_delivery_outcome_is_durable(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+
+    claimed = executions.create_execution("job-delivery", source="manual")
+    completed = executions.finish_execution(
+        claimed["id"], success=True, delivery_outcome="delivered"
+    )
+
+    assert completed["delivery_outcome"] == "delivered"
+    assert executions.get_execution(claimed["id"])["delivery_outcome"] == "delivered"
+
+
+def test_execution_schema_adds_delivery_outcome_to_existing_database(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    executions.EXECUTIONS_FILE.parent.mkdir(parents=True)
+    with sqlite3.connect(executions.EXECUTIONS_FILE) as conn:
+        conn.execute(
+            """CREATE TABLE executions (
+                 id TEXT PRIMARY KEY, job_id TEXT NOT NULL, source TEXT NOT NULL,
+                 process_id TEXT NOT NULL, pid INTEGER NOT NULL,
+                 process_started_at INTEGER, status TEXT NOT NULL,
+                 claimed_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+                 error TEXT
+               )"""
+        )
+
+    claimed = executions.create_execution("legacy-job", source="manual")
+    completed = executions.finish_execution(
+        claimed["id"], success=True, delivery_outcome="local_only"
+    )
+
+    assert completed["delivery_outcome"] == "local_only"
+
+
 def test_execution_ledger_follows_the_current_profile_home(monkeypatch, tmp_path):
     import cron.executions as executions
 

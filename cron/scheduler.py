@@ -546,7 +546,13 @@ from cron.jobs import (
     save_job_output,
     use_cron_store,
 )
-from cron.executions import create_execution, finish_execution, mark_execution_running
+from cron.executions import (
+    RunCompletionResult,
+    create_execution,
+    finish_execution,
+    get_execution,
+    mark_execution_running,
+)
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -6668,6 +6674,7 @@ def run_one_job(
     verbose: bool = False,
     extra_prompt: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None,
+    completion_result: Optional[RunCompletionResult] = None,
 ) -> bool:
     """Run ONE due job end-to-end: execute → save output → deliver → mark.
 
@@ -6688,6 +6695,11 @@ def run_one_job(
     run cooperatively — agent interruption AND script process-tree kill —
     through the single fenced completion path.
     """
+    execution_id = job.get("execution_id")
+    if not execution_id:
+        execution_id = create_execution(job["id"], source="direct")["id"]
+        job = dict(job, execution_id=execution_id)
+
     claim = job.get("fire_claim")
     fire_owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
     execution_token = object()
@@ -6715,6 +6727,20 @@ def run_one_job(
             ),
         )
     finally:
+        if completion_result is not None:
+            try:
+                execution = get_execution(execution_id) or {}
+            except Exception:
+                logger.warning(
+                    "Job '%s': failed to read terminal execution outcome",
+                    job["id"],
+                    exc_info=True,
+                )
+                execution = {}
+            completion_result.update(
+                execution_id=execution_id,
+                delivery_outcome=execution.get("delivery_outcome") or "skipped",
+            )
         with _running_lock:
             executions = _running_fire_owners.get(job["id"])
             if executions is not None:
@@ -7092,6 +7118,8 @@ def _run_one_job_body(
             delivery_outcome = "not_configured"
         elif should_deliver and normalized_deliver != "local":
             delivery_outcome = "delivered"
+        elif normalized_deliver == "local":
+            delivery_outcome = "local_only"
         else:
             delivery_outcome = "suppressed"
         finish_execution(
@@ -7115,7 +7143,8 @@ def _run_one_job_body(
         # a stale worker must not record over a replacement claim owner.
         _err_text = str(e) or type(e).__name__
         logger.error("Error processing job %s: %s", job['id'], _err_text)
-        delivery_outcome = "suppressed"
+        normalized_deliver = _normalize_deliver_value(job.get("deliver", "local"))
+        delivery_outcome = "local_only" if normalized_deliver == "local" else "skipped"
         # Owner fencing: a stale worker whose fire claim was taken over (or a
         # transport-cancelled worker) must not send a failure alert on top of
         # the replacement run's own delivery — fall through silently and let
@@ -7126,9 +7155,6 @@ def _run_one_job_body(
             and not isinstance(e, _FireClaimLostDuringSideEffect)
             and not _fire_claim_ownership_lost()
         ):
-            normalized_deliver = _normalize_deliver_value(
-                job.get("deliver", "local")
-            )
             unresolved_origin = False
             try:
                 delivery_attempted = True
