@@ -8,7 +8,11 @@ import pytest
 
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
+from gateway.run import (
+    GatewayRunner,
+    _adopt_queued_reply_message_type,
+    _carry_queued_reply_message_type,
+)
 from gateway.session import SessionSource
 
 
@@ -92,6 +96,34 @@ class TestAutoVoiceReplyFormat:
 
         voice_event = _make_event(Platform.TELEGRAM, chat_id="123", message_type=MessageType.VOICE)
         assert runner._should_send_voice_reply(voice_event, "hello", [], already_sent=True) is True
+
+    def test_queued_voice_type_reaches_outer_adapter_postprocessing(self):
+        """The final queued turn, not the interrupted turn, owns reply format."""
+        outer_event = _make_event(
+            Platform.WHATSAPP,
+            message_type=MessageType.TEXT,
+        )
+
+        result = _carry_queued_reply_message_type(
+            {"final_response": "voice response"},
+            MessageType.VOICE,
+        )
+        _adopt_queued_reply_message_type(outer_event, result)
+
+        assert outer_event.message_type == MessageType.VOICE
+
+    def test_nested_queue_keeps_deepest_reply_message_type(self):
+        """An outer queued turn must not overwrite a later nested turn's type."""
+        result = _carry_queued_reply_message_type(
+            {"final_response": "final"},
+            MessageType.VOICE,
+        )
+        result = _carry_queued_reply_message_type(result, MessageType.TEXT)
+        outer_event = _make_event(Platform.WHATSAPP)
+
+        _adopt_queued_reply_message_type(outer_event, result)
+
+        assert outer_event.message_type == MessageType.VOICE
 
 def _make_runner() -> GatewayRunner:
     with patch("gateway.run.GatewayRunner._load_voice_modes", return_value={}):

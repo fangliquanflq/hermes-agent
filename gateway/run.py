@@ -4192,6 +4192,32 @@ def _preserve_queued_followup_history_offset(
     return merged
 
 
+_QUEUED_REPLY_MESSAGE_TYPE_KEY = "_gateway_queued_reply_message_type"
+
+
+def _carry_queued_reply_message_type(
+    followup_result: dict,
+    message_type: Optional[MessageType],
+) -> dict:
+    """Carry the deepest queued turn's type back to adapter post-processing."""
+    if not isinstance(followup_result, dict) or message_type is None:
+        return followup_result
+    if _QUEUED_REPLY_MESSAGE_TYPE_KEY in followup_result:
+        return followup_result
+    carried = dict(followup_result)
+    carried[_QUEUED_REPLY_MESSAGE_TYPE_KEY] = message_type
+    return carried
+
+
+def _adopt_queued_reply_message_type(event: MessageEvent, agent_result: dict) -> None:
+    """Make the outer adapter event represent the final queued logical turn."""
+    if not isinstance(agent_result, dict):
+        return
+    message_type = agent_result.pop(_QUEUED_REPLY_MESSAGE_TYPE_KEY, None)
+    if message_type is not None:
+        event.message_type = message_type
+
+
 async def _dispose_unused_adapter(adapter: "BasePlatformAdapter | None") -> None:
     """Best-effort dispose for an adapter that never made it onto ``self.adapters``.
 
@@ -20433,6 +20459,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_display_kind=persist_user_display_kind,
                 message_type=event.message_type,
             )
+            _adopt_queued_reply_message_type(event, agent_result)
             _turn_seconds = time.monotonic() - _turn_started_monotonic
 
             # Stop persistent typing indicator now that the agent is done.
@@ -29870,6 +29897,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
                     message_type=next_message_type,
+                )
+                followup_result = _carry_queued_reply_message_type(
+                    followup_result,
+                    next_message_type,
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:
