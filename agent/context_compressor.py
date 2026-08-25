@@ -3325,6 +3325,11 @@ class ContextCompressor(ContextEngine):
         # strictly better than discarding context for a transient blip
         # (#29559, #25585). Independent of abort_on_summary_failure.
         self._last_summary_network_failure: bool = False
+        # Set when a configured provider returns a well-formed response whose
+        # summary content is null, empty, or whitespace-only.  This is a
+        # provider failure, not a usable deterministic handoff: compress()
+        # must preserve the transcript rather than delete the middle window.
+        self._last_summary_empty_content_failure: bool = False
         # retrying on the main model, record the failure so gateway /
         # CLI callers can still warn the user even though compression
         # succeeded.  Silent recovery would hide the broken config.
@@ -5044,6 +5049,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             # main-model fallback + cooldown machinery as a transport error,
             # rather than replacing real context with an empty summary.
             if not content.strip():
+                self._last_summary_empty_content_failure = True
                 raise RuntimeError(
                     "Context compression LLM returned empty content "
                     f"(provider={self.provider or 'auto'} "
@@ -5075,6 +5081,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             self._last_summary_error = None
             self._last_summary_auth_failure = False
             self._last_summary_network_failure = False
+            self._last_summary_empty_content_failure = False
             return self._with_summary_prefix(summary)
         except Exception as e:
             # ``call_llm`` raises ``RuntimeError`` for two very different cases:
@@ -7642,18 +7649,19 @@ This compaction should PRIORITISE preserving all information related to the focu
         #           surface a warning.
         # Default is False (historical behavior).
         #
-        # EXCEPTION — terminal access/quota AND transient network failures
-        # always abort. Missing credentials, 401/402/403 access failures, and
-        # confirmed non-resetting quota exhaustion cannot be repaired by
-        # retrying the same summary request. A connection/stream-close error
-        # means the network blipped at the compaction moment (#29559). In all
+        # EXCEPTION — terminal access/quota, transient network failures, and
+        # empty provider responses always abort. Missing credentials,
+        # 401/402/403 access failures, confirmed non-resetting quota
+        # exhaustion, a connection/stream-close error, or an HTTP-success
+        # response with no summary all leave no trustworthy handoff. In all
         # of these cases, rotating into a child session with a placeholder
         # summary degrades the conversation for zero benefit. Preserve it
-        # unchanged until access is restored or connectivity recovers.
+        # unchanged until the provider recovers.
         if not summary and not feasibility_skip and (
             self.abort_on_summary_failure
             or self._last_summary_auth_failure
             or self._last_summary_network_failure
+            or self._last_summary_empty_content_failure
         ):
             n_skipped = compress_end - compress_start
             self._last_summary_dropped_count = 0  # nothing actually dropped
@@ -7663,6 +7671,8 @@ This compaction should PRIORITISE preserving all information related to the focu
                 telemetry["failure_class"] = "summary_auth_failure"
             elif self._last_summary_network_failure:
                 telemetry["failure_class"] = "summary_network_failure"
+            elif self._last_summary_empty_content_failure:
+                telemetry["failure_class"] = "summary_empty_content"
             else:
                 telemetry["failure_class"] = "summary_generation_aborted"
             # Roll back the self-heal rehydration so this aborted attempt is a
@@ -7688,6 +7698,15 @@ This compaction should PRIORITISE preserving all information related to the focu
                         "unchanged; the session was NOT rotated. This is "
                         "transient: retry with /compress once connectivity "
                         "recovers, or continue the conversation as-is.",
+                        n_skipped,
+                    )
+                elif self._last_summary_empty_content_failure:
+                    logger.warning(
+                        "Summary provider returned empty content — aborting "
+                        "compression. %d message(s) preserved unchanged; the "
+                        "session was NOT rotated. Retry with /compress once "
+                        "the provider recovers, or continue the conversation "
+                        "as-is.",
                         n_skipped,
                     )
                 else:

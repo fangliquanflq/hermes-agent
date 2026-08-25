@@ -661,13 +661,45 @@ class TestNonStringContent:
     """Regression: content as dict (e.g., llama.cpp tool calls) must not crash."""
 
 
+    def test_empty_summary_content_aborts_without_dropping_middle(self):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = None
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="test",
+                quiet_mode=True,
+                protect_first_n=2,
+                protect_last_n=2,
+                abort_on_summary_failure=False,
+            )
+
+        messages = [
+            {
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"message {i}",
+            }
+            for i in range(12)
+        ]
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response):
+            result = c.compress(messages, current_tokens=999999, force=True)
+
+        assert result == messages
+        assert c._last_compress_aborted is True
+        assert c._last_summary_fallback_used is False
+        assert c._last_summary_dropped_count == 0
+        assert c._last_compression_telemetry["failure_class"] == "summary_empty_content"
+
+
     def test_none_content_treated_as_failure_not_empty_summary(self):
         """Regression #11978/#11914: a well-formed response with ``content=None``
         (some OpenAI-compatible proxies, e.g. cmkey.cn, return HTTP 200 with
         null/empty content) must NOT be stored as a prefix-only summary that
         silently wipes the compacted turns. It is treated as a summary failure
-        and routed through cooldown so the turns are dropped without a summary
-        rather than replaced by an empty one."""
+        and routed through cooldown; the full compression path then aborts
+        rather than deleting the middle window."""
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = None
@@ -688,6 +720,7 @@ class TestNonStringContent:
         assert summary != SUMMARY_PREFIX
         # Transient cooldown engaged so we don't immediately retry the bad proxy.
         assert c._summary_failure_cooldown_until > 0
+        assert c._last_summary_empty_content_failure is True
 
 
 
