@@ -3633,6 +3633,23 @@ def terminal_tool(
             # Extract output
             output = result.get("output", "")
             returncode = result.get("returncode", 0)
+            open_verification = None
+            if returncode == 0:
+                from gateway.session_context import get_session_env
+                from tools.macos_open_activation import verify_desktop_open_command
+
+                open_verification = verify_desktop_open_command(
+                    command,
+                    command_cwd or cwd,
+                    env_type=env_type,
+                    session_platform=get_session_env("HERMES_SESSION_PLATFORM", ""),
+                )
+                if open_verification is not None and not open_verification.verified:
+                    returncode = 1
+                    detail = open_verification.error or "target application is not frontmost"
+                    output = (
+                        f"{output.rstrip()}\n\n" if output else ""
+                    ) + f"File opened, but foreground verification failed: {detail}"
             # Spill metadata from the bounded collector: present only when
             # output overflowed the capture window (see _wait_for_process).
             spill_total_chars = result.get("output_total_chars")
@@ -3742,8 +3759,14 @@ def terminal_tool(
             result_dict = {
                 "output": output,
                 "exit_code": returncode,
-                "error": None,
+                "error": (
+                    open_verification.error
+                    if open_verification is not None and not open_verification.verified
+                    else None
+                ),
             }
+            if open_verification is not None:
+                result_dict["foreground_activation"] = open_verification.to_dict()
             # cwd echo: when the command changed the session's working
             # directory (cd, pushd, ...), tell the model where it ended up.
             # Production mining shows 60% of terminal calls carry a
