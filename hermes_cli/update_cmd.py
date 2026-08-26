@@ -5831,6 +5831,21 @@ def _rebuild_desktop_after_update(
     return True
 
 
+def _macos_tcc_stale_grant_notice(
+    *, platform: str, had_desktop_app_before_update: bool
+) -> str | None:
+    """Return post-update TCC guidance when a macOS Desktop app was installed."""
+    if platform != "darwin" or not had_desktop_app_before_update:
+        return None
+    return (
+        "  ℹ macOS: if Hermes re-prompts for permissions you already "
+        "granted (toggle shows ON), the stored grant is stale — run "
+        "`tccutil reset ScreenCapture com.nousresearch.hermes` (repeat "
+        "per affected service), toggle it ON in System Settings, then "
+        "fully quit & relaunch once."
+    )
+
+
 def _cmd_update_impl(args, gateway_mode: bool):
     """Body of ``cmd_update`` — kept separate so the wrapper can always
     restore stdio even on ``sys.exit``."""
@@ -7018,15 +7033,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # shows ON while macOS re-prompts on every capture, and the modern prompt
         # has no Allow button, so users loop. One line of guidance after update
         # tells affected users how to complete the one-time re-grant.
-        if sys.platform == "darwin" and has_desktop_app:
+        tcc_notice = _macos_tcc_stale_grant_notice(
+            platform=sys.platform,
+            had_desktop_app_before_update=had_desktop_app_before_update,
+        )
+        if tcc_notice:
             print()
-            print(
-                "  ℹ macOS: if Hermes re-prompts for permissions you already "
-                "granted (toggle shows ON), the stored grant is stale — run "
-                "`tccutil reset ScreenCapture com.nousresearch.hermes` (repeat "
-                "per affected service), toggle it ON in System Settings, then "
-                "fully quit & relaunch once."
-            )
+            print(tcc_notice)
 
         # ── macOS TCC anchor (issue #85345) ────────────────────────────
         # uv-managed interpreters move on every patch bump, orphaning macOS
