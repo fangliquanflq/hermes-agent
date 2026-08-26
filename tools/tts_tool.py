@@ -4507,7 +4507,7 @@ TTS_SCHEMA = {
             },
             "output_path": {
                 "type": "string",
-                "description": f"Optional custom file path to save the audio. Defaults to {display_hermes_home()}/audio_cache/<timestamp>.mp3"
+                "description": "Optional custom file path to save the audio. Defaults to the current profile's audio cache."
             },
             "speed": {
                 "type": "number",
@@ -4537,6 +4537,21 @@ TTS_SCHEMA = {
     }
 }
 
+
+def _build_tts_schema_overrides() -> dict:
+    """Resolve profile-dependent schema text for the active session."""
+    parameters = {**TTS_SCHEMA["parameters"]}
+    parameters["properties"] = {
+        name: dict(spec)
+        for name, spec in TTS_SCHEMA["parameters"]["properties"].items()
+    }
+    parameters["properties"]["output_path"]["description"] = (
+        "Optional custom file path to save the audio. Defaults to "
+        f"{display_hermes_home()}/audio_cache/<timestamp>.mp3"
+    )
+    return {"parameters": parameters}
+
+
 registry.register(
     name="text_to_speech",
     toolset="tts",
@@ -4548,5 +4563,6 @@ registry.register(
         instructions=args.get("instructions"),
         provider=args.get("provider")),
     check_fn=check_tts_requirements,
+    dynamic_schema_overrides=_build_tts_schema_overrides,
     emoji="🔊",
 )

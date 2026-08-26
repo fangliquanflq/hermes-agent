@@ -1874,7 +1874,7 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
             },
             "script": {
                 "type": "string",
-                "description": f"Optional script run each tick; stdout is injected into the agent's prompt as context (with no_agent=True the script IS the job). Relative paths resolve under {display_hermes_home()}/scripts/; .sh/.bash via bash, else Python. On update, '' clears."
+                "description": "Optional script run each tick; stdout is injected into the agent's prompt as context (with no_agent=True the script IS the job). Relative paths resolve under the current profile's scripts directory; .sh/.bash via bash, else Python. On update, '' clears."
             },
             "monitor": {
                 "type": "string",
@@ -1911,6 +1911,22 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
         "required": ["action"]
     }
 }
+
+
+def _build_cronjob_schema_overrides() -> dict:
+    """Resolve profile-dependent schema text for the active session."""
+    parameters = {**CRONJOB_SCHEMA["parameters"]}
+    parameters["properties"] = {
+        name: dict(spec)
+        for name, spec in CRONJOB_SCHEMA["parameters"]["properties"].items()
+    }
+    parameters["properties"]["script"]["description"] = (
+        "Optional script run each tick; stdout is injected into the agent's "
+        "prompt as context (with no_agent=True the script IS the job). Relative "
+        f"paths resolve under {display_hermes_home()}/scripts/; .sh/.bash via "
+        "bash, else Python. On update, '' clears."
+    )
+    return {"parameters": parameters}
 
 
 def check_cronjob_requirements() -> bool:
@@ -1986,5 +2002,6 @@ registry.register(
     schema=CRONJOB_SCHEMA,
     handler=_cronjob_handler,
     check_fn=check_cronjob_requirements,
+    dynamic_schema_overrides=_build_cronjob_schema_overrides,
     emoji="⏰",
 )

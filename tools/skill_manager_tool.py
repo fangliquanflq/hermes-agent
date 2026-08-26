@@ -1746,7 +1746,7 @@ SKILL_MANAGE_SCHEMA = {
     "description": (
         "Manage skills (create, update, delete). Skills are your procedural "
         "memory — reusable approaches for recurring task types. "
-        f"New skills go to {display_hermes_home()}/skills/; existing skills can be modified wherever they live.\n\n"
+        "New skills go to the current profile's skills directory; existing skills can be modified wherever they live.\n\n"
         "Actions: create (full SKILL.md + optional category), "
         "patch (old_string/new_string — preferred for fixes), "
         "edit (full SKILL.md rewrite — major overhauls only), "
@@ -1860,6 +1860,17 @@ SKILL_MANAGE_SCHEMA = {
 }
 
 
+def _build_skill_manage_schema_overrides() -> dict:
+    """Resolve profile-dependent schema text for the active session."""
+    return {
+        "description": SKILL_MANAGE_SCHEMA["description"].replace(
+            "the current profile's skills directory",
+            f"{display_hermes_home()}/skills/",
+            1,
+        )
+    }
+
+
 # --- Registry ---
 from tools.registry import registry, tool_error
 
@@ -1880,5 +1891,6 @@ registry.register(
         absorbed_into=args.get("absorbed_into"),
         task_id=kw.get("task_id"),
         session_id=kw.get("session_id")),
+    dynamic_schema_overrides=_build_skill_manage_schema_overrides,
     emoji="📝",
 )
