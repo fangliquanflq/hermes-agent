@@ -2974,6 +2974,43 @@ class TestNewEndpoints:
         mock_generate.assert_not_called()
         assert any(tool["tool"] == "read_file" for tool in resp.json()["tools"])
 
+    def test_analytics_usage_corruption_is_throttled_and_actionable(
+        self, monkeypatch, caplog
+    ):
+        import logging
+        import sqlite3
+
+        from hermes_cli import web_server
+
+        calls = []
+
+        def malformed_usage(days, profile):
+            calls.append((days, profile))
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        monkeypatch.setattr(web_server, "_get_usage_analytics", malformed_usage)
+        caplog.set_level(logging.WARNING, logger=web_server._log.name)
+
+        responses = [
+            self.client.get(
+                "/api/analytics/usage?days=7&profile=corrupt-regression"
+            )
+            for _ in range(2)
+        ]
+
+        assert [response.status_code for response in responses] == [503, 503]
+        assert len(calls) == 1
+        assert all(response.headers["retry-after"] == "300" for response in responses)
+        detail = responses[0].json()["detail"]
+        assert detail["code"] == "state_db_corrupt"
+        assert "hermes sessions repair" in detail["recovery"]
+        warnings = [
+            record
+            for record in caplog.records
+            if "database disk image is malformed" in record.getMessage()
+        ]
+        assert len(warnings) == 1
+
 # ---------------------------------------------------------------------------
 # Model context length: normalize/denormalize + /api/model/info
 # ---------------------------------------------------------------------------

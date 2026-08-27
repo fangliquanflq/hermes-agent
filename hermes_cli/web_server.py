@@ -15871,6 +15871,18 @@ def _aux_task_summary(aux_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return result
 
 
+_USAGE_DB_CORRUPTION_BACKOFF_S = 300
+_usage_db_corrupt_until: Dict[str, float] = {}
+_usage_db_poll_locks: Dict[str, threading.Lock] = {}
+_usage_db_poll_state_lock = threading.Lock()
+
+
+class _StateDBCorruptPoll(Exception):
+    def __init__(self, retry_after: int):
+        super().__init__("state database corruption backoff is active")
+        self.retry_after = retry_after
+
+
 def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
     from agent.insights import InsightsEngine
 
@@ -15943,6 +15955,49 @@ def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
         db.close()
 
 
+def _get_usage_analytics_guarded(days: int, profile: Optional[str]):
+    """Run one usage read per profile while circuit-breaking corrupt stores."""
+    import sqlite3
+
+    from hermes_state import is_malformed_db_error
+
+    key = profile or ""
+    with _usage_db_poll_state_lock:
+        poll_lock = _usage_db_poll_locks.setdefault(key, threading.Lock())
+
+    # Prevent concurrent dashboard requests from all reaching the same corrupt
+    # store before the first failure can open the circuit.
+    with poll_lock:
+        now = time.monotonic()
+        with _usage_db_poll_state_lock:
+            blocked_until = _usage_db_corrupt_until.get(key, 0.0)
+        if blocked_until > now:
+            raise _StateDBCorruptPoll(max(1, math.ceil(blocked_until - now)))
+
+        try:
+            result = _get_usage_analytics(days, profile)
+        except sqlite3.DatabaseError as exc:
+            if not is_malformed_db_error(exc):
+                raise
+            with _usage_db_poll_state_lock:
+                _usage_db_corrupt_until[key] = (
+                    time.monotonic() + _USAGE_DB_CORRUPTION_BACKOFF_S
+                )
+            _log.warning(
+                "Dashboard usage polling paused for %ss because state.db for "
+                "profile %r is corrupt (%s). Stop its writers and run "
+                "`hermes sessions repair` for that profile.",
+                _USAGE_DB_CORRUPTION_BACKOFF_S,
+                profile or "current",
+                exc,
+            )
+            raise _StateDBCorruptPoll(_USAGE_DB_CORRUPTION_BACKOFF_S) from None
+
+        with _usage_db_poll_state_lock:
+            _usage_db_corrupt_until.pop(key, None)
+        return result
+
+
 @app.get("/api/analytics/usage")
 async def get_usage_analytics(
     days: int = Query(30, ge=1, le=365),
@@ -15952,7 +16007,21 @@ async def get_usage_analytics(
     values would force expensive full-history SQL and InsightsEngine work, or
     produce empty/inverted time windows. The UI only offers 7/30/90-day
     presets."""
-    return await asyncio.to_thread(_get_usage_analytics, days, profile)
+    try:
+        return await asyncio.to_thread(_get_usage_analytics_guarded, days, profile)
+    except _StateDBCorruptPoll as exc:
+        raise HTTPException(
+            status_code=503,
+            headers={"Retry-After": str(exc.retry_after)},
+            detail={
+                "code": "state_db_corrupt",
+                "message": "Usage analytics are unavailable because state.db is corrupt.",
+                "recovery": (
+                    "Stop processes writing this profile, then run "
+                    "`hermes sessions repair` for that profile."
+                ),
+            },
+        ) from None
 
 
 def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
