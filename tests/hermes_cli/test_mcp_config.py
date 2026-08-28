@@ -302,6 +302,52 @@ class TestMcpTest:
         assert "Connected" in out
         assert "Tools discovered: 2" in out
 
+    def test_auth_display_fully_redacts_resolved_bearer(self, tmp_path, capsys, monkeypatch):
+        secret = "unique-prefix-0123456789-unique-suffix"
+        monkeypatch.setenv("MCP_TEST_TOKEN", secret)
+        _seed_config(tmp_path, {
+            "secure": {
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer ${MCP_TEST_TOKEN}"},
+            },
+        })
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server", lambda *args, **kwargs: []
+        )
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(_make_args(name="secure"))
+        out = capsys.readouterr().out
+
+        assert "Authorization: [REDACTED]" in out
+        assert secret not in out
+        assert "unique-prefix" not in out
+        assert "unique-suffix" not in out
+
+    def test_probe_exception_fully_redacts_bearer(self, tmp_path, capsys, monkeypatch):
+        secret = "unique-prefix-0123456789-unique-suffix"
+        _seed_config(tmp_path, {
+            "secure": {
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": f"Bearer {secret}"},
+            },
+        })
+
+        def fail_probe(*args, **kwargs):
+            raise RuntimeError(f"upstream echoed Authorization: Bearer {secret}")
+
+        monkeypatch.setattr("hermes_cli.mcp_config._probe_single_server", fail_probe)
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(_make_args(name="secure"))
+        out = capsys.readouterr().out
+
+        assert "Connection failed" in out
+        assert "Authorization: [REDACTED]" in out
+        assert secret not in out
+        assert "unique-prefix" not in out
+        assert "unique-suffix" not in out
+
     def test_probe_uses_configured_connect_timeout(self, monkeypatch):
         """OAuth-capable probes must not hard-code a short 30s timeout."""
         import asyncio

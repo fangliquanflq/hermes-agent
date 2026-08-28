@@ -1328,6 +1328,28 @@ class TestSanitizeError:
         result = _sanitize_error("normal error message")
         assert result == "normal error message"
 
+    def test_fully_redacts_structured_and_configured_headers(self):
+        from tools.mcp_tool import _sanitize_error
+
+        secret = "unique-prefix-0123456789-unique-suffix"
+        config = {
+            "headers": {
+                "Authorization": f"Basic {secret}",
+                "X-Custom-Token": secret,
+            },
+        }
+        text = (
+            f"request failed with Authorization: Basic {secret}; "
+            f"headers={{'X-Custom-Token': '{secret}'}}"
+        )
+
+        result = _sanitize_error(text, config=config)
+
+        assert "Authorization: [REDACTED]" in result
+        assert secret not in result
+        assert "unique-prefix" not in result
+        assert "unique-suffix" not in result
+
 # ---------------------------------------------------------------------------
 # HTTP config
 # ---------------------------------------------------------------------------

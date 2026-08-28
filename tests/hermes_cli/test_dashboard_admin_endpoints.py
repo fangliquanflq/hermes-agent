@@ -138,6 +138,34 @@ class TestMcpEndpoints:
         assert response.status_code == 400
         assert error in response.json()["detail"]
 
+    def test_probe_error_fully_redacts_bearer(self, monkeypatch):
+        secret = "unique-prefix-0123456789-unique-suffix"
+        response = self.client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "secure",
+                "url": "https://example.com/mcp",
+                "auth": "header",
+                "bearer_token": secret,
+            },
+        )
+        assert response.status_code == 200
+
+        def fail_probe(*args, **kwargs):
+            raise RuntimeError(f"upstream echoed Authorization: Bearer {secret}")
+
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server", fail_probe
+        )
+        response = self.client.post("/api/mcp/servers/secure/test")
+        body = response.json()
+
+        assert body["ok"] is False
+        assert "Authorization: [REDACTED]" in body["error"]
+        assert secret not in body["error"]
+        assert "unique-prefix" not in body["error"]
+        assert "unique-suffix" not in body["error"]
+
 
 
 

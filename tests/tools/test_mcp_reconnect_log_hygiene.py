@@ -174,3 +174,49 @@ def test_initial_retry_attempts_log_debug(monkeypatch, tmp_path, caplog):
         and "connecting → parked" in r.getMessage()
     ]
     assert len(park_warnings) == 1
+
+
+@pytest.mark.no_isolate
+def test_connection_logs_fully_redact_bearer(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from tools import mcp_tool
+
+    monkeypatch.setattr(mcp_tool, "_MAX_INITIAL_CONNECT_RETRIES", 0)
+    secret = "unique-prefix-0123456789-unique-suffix"
+    state = {"parked": False}
+
+    async def _scenario():
+        class _Task(MCPServerTask):
+            def _is_http(self):
+                return False
+
+            def _deregister_tools(self):
+                state["parked"] = True
+                self._registered_tool_names = []
+
+            async def _run_stdio(self, config):
+                raise ConnectionError(
+                    f"upstream echoed Authorization: Bearer {secret}"
+                )
+
+        task = _Task("secure")
+        with caplog.at_level(logging.DEBUG, logger="tools.mcp_tool"):
+            run_task = asyncio.ensure_future(task.run({"command": "x"}))
+            for _ in range(1000):
+                await asyncio.sleep(0)
+                if state["parked"]:
+                    break
+
+        assert state["parked"]
+        task._shutdown_event.set()
+        task._reconnect_event.set()
+        await asyncio.wait_for(run_task, timeout=15)
+
+    asyncio.run(_scenario())
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+
+    assert "Authorization: [REDACTED]" in log_text
+    assert secret not in log_text
+    assert "unique-prefix" not in log_text
+    assert "unique-suffix" not in log_text

@@ -145,6 +145,33 @@ class TestConfiguredOnlySelection:
         assert len(results) == 2
         assert all(r.status == "pass" for r in results)
 
+    def test_mcp_probe_error_fully_redacts_bearer(self, monkeypatch):
+        secret = "unique-prefix-0123456789-unique-suffix"
+        monkeypatch.setattr(
+            doctor_live,
+            "_load_config",
+            lambda: {
+                "mcp_servers": {
+                    "secure": {
+                        "url": "https://example.com/mcp",
+                        "headers": {"Authorization": f"Bearer {secret}"},
+                    },
+                },
+            },
+        )
+
+        def fail_probe(*args, **kwargs):
+            raise RuntimeError(f"upstream echoed Authorization: Bearer {secret}")
+
+        monkeypatch.setattr(doctor_live, "_probe_mcp_server", fail_probe)
+        result = next(r for r in run_live_checks([]) if r.name == "MCP: secure")
+
+        assert result.status == "fail"
+        assert "Authorization: [REDACTED]" in result.detail
+        assert secret not in result.detail
+        assert "unique-prefix" not in result.detail
+        assert "unique-suffix" not in result.detail
+
     def test_tts_local_provider_skipped(self, monkeypatch):
         monkeypatch.setattr(
             doctor_live, "_load_config",

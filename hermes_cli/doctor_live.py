@@ -300,7 +300,13 @@ def run_live_checks(issues: List[str]) -> List[ProbeResult]:
                 if not isinstance(e, dict):
                     return ProbeResult(f"MCP: {n}", "skip",
                                        "(malformed config entry)")
-                tools = _probe_mcp_server(n, e, timeout)
+                try:
+                    tools = _probe_mcp_server(n, e, timeout)
+                except Exception as exc:
+                    from tools.mcp_tool import _sanitize_error
+
+                    message = _sanitize_error(str(exc), config=e)
+                    return ProbeResult(f"MCP: {n}", "fail", f"({message})")
                 return ProbeResult(f"MCP: {n}", "pass",
                                    f"({len(tools)} tool(s))")
 

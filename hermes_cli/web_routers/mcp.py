@@ -199,9 +199,11 @@ async def test_mcp_server(name: str, profile: Optional[str] = None):
         # FastAPI event loop is never blocked.
         tools, token_present = await asyncio.to_thread(_probe_scoped)
     except Exception as exc:
+        from tools.mcp_tool import _sanitize_error
+
         return {
             "ok": False,
-            "error": str(exc),
+            "error": _sanitize_error(str(exc), config=servers[name]),
             "tools": [],
         }
     if not token_present:

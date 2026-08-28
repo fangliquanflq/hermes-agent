@@ -667,6 +667,15 @@ _CREDENTIAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# MCP transports and SDK exceptions commonly echo request headers. Unlike the
+# generic log redactor, this boundary never preserves credential fingerprints:
+# the complete Authorization value is replaced, for every auth scheme.
+_MCP_AUTHORIZATION_HEADER_PATTERN = re.compile(
+    r"((?:Proxy-)?Authorization\s*:\s*)"
+    r"(?:[A-Za-z][A-Za-z0-9_-]*\s+)?[^\s,;\"'}]+",
+    re.IGNORECASE,
+)
+
 # Pre-compiled pattern for ${VAR_NAME} style env-var interpolation.
 # Supports any non-} characters in the variable name (hyphens, dots, etc.)
 # so providers like MY-VAR or my.var work correctly.
@@ -765,13 +774,34 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
     return env
 
 
-def _sanitize_error(text: str) -> str:
+def _sanitize_error(text: str, *, config: Optional[dict] = None) -> str:
     """Strip credential-like patterns from error text before returning to LLM.
 
     Replaces tokens, keys, and other secrets with [REDACTED] to prevent
-    accidental credential exposure in tool error responses.
+    accidental credential exposure in tool error responses, CLI/dashboard
+    diagnostics, and runtime logs. When a server config is available, exact
+    configured credential-header values are removed first so custom opaque
+    schemes and header names cannot evade the generic patterns.
     """
-    return _CREDENTIAL_PATTERN.sub("[REDACTED]", text)
+    sanitized = str(text)
+    headers = config.get("headers") if isinstance(config, dict) else None
+    if isinstance(headers, dict):
+        try:
+            resolved_headers = _interpolate_env_vars(headers)
+        except Exception:
+            resolved_headers = headers
+        for name, value in resolved_headers.items():
+            lower_name = str(name).lower()
+            if not any(marker in lower_name for marker in ("auth", "key", "token", "secret", "password")):
+                continue
+            if isinstance(value, str) and value and "${" not in value:
+                sanitized = sanitized.replace(value, "[REDACTED]")
+
+    sanitized = _MCP_AUTHORIZATION_HEADER_PATTERN.sub(
+        lambda match: match.group(1) + "[REDACTED]",
+        sanitized,
+    )
+    return _CREDENTIAL_PATTERN.sub("[REDACTED]", sanitized)
 
 
 def _exc_str(exc: BaseException) -> str:
@@ -2944,11 +2974,12 @@ class MCPServerTask:
             await asyncio.wait_for(self._keepalive_probe(), timeout=timeout)
         except Exception as exc:
             root = _unwrap_exception_group(exc)
+            root_text = _sanitize_error(_exc_str(root), config=self._config)
             logger.warning(
                 "MCP server '%s': suspect connection (%s) failed health "
                 "check (%s: %s) — requesting reconnect (state: suspect → "
                 "degraded)",
-                self.name, reason, type(root).__name__, root,
+                self.name, reason, type(root).__name__, root_text,
             )
             self._suspect_reason = None
             self.mark_suspect(f"health check failed after {reason}")
@@ -3105,13 +3136,16 @@ class MCPServerTask:
                         await _probe_under_lock()
                     except Exception as exc:
                         root = _unwrap_exception_group(exc)
+                        root_text = _sanitize_error(
+                            _exc_str(root), config=self._config
+                        )
                         logger.warning(
                             "MCP server '%s' keepalive failed, triggering "
                             "reconnect (state: connected → degraded): %s: %s",
-                            self.name, type(root).__name__, root,
+                            self.name, type(root).__name__, root_text,
                         )
                         self.mark_suspect(
-                            f"keepalive failed: {type(root).__name__}: {root}"
+                            f"keepalive failed: {type(root).__name__}: {root_text}"
                         )
                         self._reconnect_event.set()
                         break
@@ -4138,11 +4172,12 @@ class MCPServerTask:
                 # (e.g. "BrokenPipeError: ").
                 root = _unwrap_exception_group(exc)
                 failure_class = _classify_mcp_failure(root)
+                root_text = _sanitize_error(_exc_str(root), config=self._config)
                 if self._is_recycled_stdio():
                     logger.warning(
                         "MCP server '%s': lazy reconnect after stdio recycle "
                         "failed, marking unavailable while retrying: %s: %s",
-                        self.name, type(root).__name__, root,
+                        self.name, type(root).__name__, root_text,
                     )
                     self._recycled_reason = None
 
@@ -4178,14 +4213,14 @@ class MCPServerTask:
                                 "with `hermes mcp login %s` "
                                 "(state: connecting → parked): %s: %s",
                                 self.name, self.name,
-                                type(root).__name__, root,
+                                type(root).__name__, root_text,
                             )
                         else:
                             logger.warning(
                                 "MCP server '%s' failed initial connection with a "
                                 "permanent error, parking without retries "
                                 "(state: connecting → parked): %s: %s",
-                                self.name, type(root).__name__, root,
+                                self.name, type(root).__name__, root_text,
                             )
                         self._error = exc
                         self._ready.set()
@@ -4217,7 +4252,7 @@ class MCPServerTask:
                             "%d attempts, parking until a reconnect is "
                             "requested (state: connecting → parked): %s: %s",
                             self.name, _MAX_INITIAL_CONNECT_RETRIES,
-                            type(root).__name__, root,
+                            type(root).__name__, root_text,
                         )
                         self._error = exc
                         self._ready.set()
@@ -4247,7 +4282,7 @@ class MCPServerTask:
                         "(attempt %d/%d), retrying in %.0fs: %s: %s",
                         self.name, initial_retries,
                         _MAX_INITIAL_CONNECT_RETRIES, backoff,
-                        type(root).__name__, root,
+                        type(root).__name__, root_text,
                     )
                     await asyncio.sleep(_jittered(backoff))
                     backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
@@ -4263,7 +4298,7 @@ class MCPServerTask:
                 if self._shutdown_event.is_set():
                     logger.debug(
                         "MCP server '%s' disconnected during shutdown: %s: %s",
-                        self.name, type(root).__name__, root,
+                        self.name, type(root).__name__, root_text,
                     )
                     return
 
@@ -4283,14 +4318,14 @@ class MCPServerTask:
                     ):
                         self._permanent_grace_used = True
                         self.mark_suspect(
-                            f"auth error on proven session: {root}"
+                            f"auth error on proven session: {root_text}"
                         )
                         logger.warning(
                             "MCP server '%s': auth error on a previously "
                             "healthy session — marking suspect and forcing "
                             "one reconnect instead of parking (state: "
                             "connected → suspect): %s: %s",
-                            self.name, type(root).__name__, root,
+                            self.name, type(root).__name__, root_text,
                         )
                         self._reconnect_retries = 0
                         backoff = 1.0
@@ -4307,7 +4342,7 @@ class MCPServerTask:
                         "without retries; will self-probe every %ds "
                         "(state: connected → parked): %s: %s",
                         self.name, _PARKED_RETRY_INTERVAL,
-                        type(root).__name__, root,
+                        type(root).__name__, root_text,
                     )
                     self._was_parked = True
                     self._deregister_tools()
@@ -4335,7 +4370,7 @@ class MCPServerTask:
                         "(state: degraded → parked): %s: %s",
                         self.name, _MAX_RECONNECT_RETRIES,
                         _PARKED_RETRY_INTERVAL,
-                        type(root).__name__, root,
+                        type(root).__name__, root_text,
                     )
                     # Do NOT return — exiting the task orphans the server:
                     # nothing would ever listen for _reconnect_event again
@@ -4376,7 +4411,7 @@ class MCPServerTask:
                     "MCP server '%s' connection lost (attempt %d/%d), "
                     "reconnecting in %.0fs: %s: %s",
                     self.name, self._reconnect_retries, _MAX_RECONNECT_RETRIES,
-                    backoff, type(root).__name__, root,
+                    backoff, type(root).__name__, root_text,
                 )
                 await asyncio.sleep(_jittered(backoff))
                 backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
