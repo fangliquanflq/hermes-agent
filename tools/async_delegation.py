@@ -1201,6 +1201,11 @@ def _push_batch_completion_event(
         "dispatched_at": dispatched_at,
         "completed_at": completed_at,
     }
+    # One structured config-level diagnostic, detected before persistence so
+    # every completion consumer renders the same signal. Keep healthy event
+    # payloads byte-compatible by omitting the field when no rejection exists.
+    if combined.get("model_rejection") is not None:
+        evt["model_rejection"] = combined["model_rejection"]
     # Routing origin captured at dispatch (see _capture_routing_origin).
     for _k in ("scope_id", "user_id", "user_name"):
         if event_record.get(_k):

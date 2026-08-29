@@ -4110,6 +4110,13 @@ def delegate_task(
             "results": results,
             "total_duration_seconds": total_duration,
         }
+        model_rejection = _detect_delegation_model_rejection(
+            results,
+            model=creds.get("model"),
+            provider=creds.get("provider"),
+        )
+        if model_rejection is not None:
+            combined["model_rejection"] = model_rejection
         if live_paths:
             combined["live_transcripts"] = list(live_paths)
         return combined
@@ -4364,6 +4371,56 @@ def delegate_task(
 
     # ----- Synchronous path -----
     return json.dumps(_execute_and_aggregate(), ensure_ascii=False)
+
+
+def _detect_delegation_model_rejection(
+    results: List[Dict[str, Any]],
+    *,
+    model: Optional[str],
+    provider: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Return one structured diagnostic for rejected delegation models.
+
+    Only abnormal child exits are inspected, and the rejected model must be
+    named in the provider text. This keeps ordinary task output that merely
+    discusses an unknown model from becoming a configuration warning.
+    """
+    from agent.error_classifier import FailoverReason, classify_api_error
+
+    matches: List[str] = []
+    configured_model = str(model or "").strip()
+    for result in results:
+        if result.get("exit_reason") == "completed" or result.get("tool_trace"):
+            continue
+        candidate = str(result.get("error") or result.get("summary") or "").strip()
+        result_model = str(result.get("model") or configured_model).strip()
+        if (
+            not candidate
+            or not result_model
+            or result_model.lower() not in candidate.lower()
+        ):
+            continue
+        try:
+            classified = classify_api_error(
+                Exception(candidate),
+                provider=str(provider or ""),
+                model=result_model,
+            )
+        except Exception:
+            continue
+        if classified.reason == FailoverReason.model_not_found:
+            matches.append(candidate)
+
+    if not matches:
+        return None
+    return {
+        "classification": FailoverReason.model_not_found.value,
+        "model": configured_model or str(results[0].get("model") or ""),
+        "provider": str(provider or ""),
+        "message": matches[0],
+        "affected_tasks": len(matches),
+        "total_tasks": len(results),
+    }
 
 
 def _resolve_child_credential_pool(

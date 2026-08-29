@@ -623,6 +623,97 @@ def test_delegate_task_background_routes_async_and_does_not_block(monkeypatch):
     assert "the real task" in text
 
 
+def test_delegate_task_surfaces_configured_model_rejection_once(monkeypatch):
+    """A deterministic rejection of the child model is a batch-level config
+    failure, not merely another per-task summary."""
+    from unittest.mock import MagicMock
+    import tools.delegate_tool as dt
+
+    parent = MagicMock()
+    parent._delegate_depth = 0
+    parent.session_id = "sess"
+    parent._interrupt_requested = False
+    parent._active_children = []
+    parent._active_children_lock = None
+    fake_child = MagicMock()
+    fake_child._delegate_role = "leaf"
+    fake_child._subagent_id = "s1"
+
+    rejected_model = "upstage/solar-pro-4"
+    rejection = f"HTTP 400: {rejected_model} is not a valid model ID"
+    creds = {
+        "model": rejected_model,
+        "provider": "openrouter",
+        "base_url": None,
+        "api_key": None,
+        "api_mode": None,
+        "command": None,
+        "args": None,
+    }
+    monkeypatch.setattr(dt, "_build_child_agent", lambda **kw: fake_child)
+    monkeypatch.setattr(dt, "_resolve_delegation_credentials", lambda *a, **k: creds)
+    monkeypatch.setattr(
+        dt,
+        "_run_single_child",
+        lambda *a, **k: {
+            "task_index": 0,
+            "status": "completed",
+            "summary": rejection,
+            "api_calls": 1,
+            "duration_seconds": 0.1,
+            "model": rejected_model,
+            "exit_reason": "max_iterations",
+            "truncated": True,
+        },
+    )
+
+    out = dt.delegate_task(
+        goal="task that never starts",
+        background=True,
+        parent_agent=parent,
+    )
+    dispatch = json.loads(out)
+    evt = _drain_for(dispatch["delegation_id"])
+
+    assert evt is not None
+    assert evt["model_rejection"] == {
+        "classification": "model_not_found",
+        "model": rejected_model,
+        "provider": "openrouter",
+        "message": rejection,
+        "affected_tasks": 1,
+        "total_tasks": 1,
+    }
+    text = format_process_notification(evt)
+    assert text is not None
+    assert text.count("SUBAGENT MODEL REJECTED") == 1
+    assert rejected_model in text
+    assert "openrouter" in text
+    assert "Every task in this batch failed before doing any work" in text
+    assert "Settings → Advanced → Subagent Model" in text
+    assert "hermes config get delegation.model" in text
+
+
+def test_model_rejection_diagnostic_ignores_completed_or_worked_tasks():
+    from tools.delegate_tool import _detect_delegation_model_rejection
+
+    base = {
+        "status": "completed",
+        "summary": "HTTP 400: bad/model is not a valid model ID",
+        "model": "bad/model",
+    }
+    completed = {**base, "exit_reason": "completed", "tool_trace": []}
+    worked = {
+        **base,
+        "exit_reason": "max_iterations",
+        "tool_trace": [{"tool": "terminal", "status": "ok"}],
+    }
+
+    assert _detect_delegation_model_rejection(
+        [completed, worked], model="bad/model", provider="openrouter"
+    ) is None
+
+
 def test_delegate_task_background_uses_live_tui_agent_session_id(monkeypatch):
     """TUI async delegation must route to the live/compressed agent id.
 

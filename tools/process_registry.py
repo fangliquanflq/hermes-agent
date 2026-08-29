@@ -3014,6 +3014,33 @@ def _format_async_delegation(evt: dict) -> str:
         if toolsets:
             lines.append(f"Toolsets: {', '.join(toolsets)}")
         lines.append(f"Role: {role}   Model: {model}   Total duration: {total_dur}s")
+        model_rejection = evt.get("model_rejection")
+        if isinstance(model_rejection, dict):
+            rejected_model = model_rejection.get("model") or model
+            rejected_provider = model_rejection.get("provider") or "unknown"
+            affected = model_rejection.get("affected_tasks", 0)
+            total = model_rejection.get("total_tasks", n)
+            lines.extend(
+                [
+                    "",
+                    "⚠ SUBAGENT MODEL REJECTED",
+                    f'The configured Subagent Model "{rejected_model}" was rejected '
+                    f'by provider "{rejected_provider}".',
+                ]
+            )
+            if affected == total and total:
+                lines.append("Every task in this batch failed before doing any work.")
+            else:
+                lines.append(
+                    f"{affected} of {total} tasks failed before doing any work."
+                )
+            rejection_message = model_rejection.get("message")
+            if rejection_message:
+                lines.append(str(rejection_message))
+            lines.append(
+                "Check Settings → Advanced → Subagent Model, or run "
+                "`hermes config get delegation.model`."
+            )
         if error and not results:
             lines.append("--- ERROR ---")
             lines.append(f"The batch did not complete successfully: {error}")
