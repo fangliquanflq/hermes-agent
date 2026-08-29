@@ -118,6 +118,8 @@ export type GatewayEventPayload = {
   count?: number
   // status.update (kind=process → background process completion/watch-match)
   kind?: string
+  // background.complete — detached prompt identity for the completion row.
+  task_id?: string
   // pane.reveal (agent focusing a desktop pane via the focus_pane tool)
   pane?: string
   // layout.apply (agent applying a layout preset via the apply_layout tool)

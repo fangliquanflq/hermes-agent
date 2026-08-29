@@ -53,6 +53,7 @@ export interface DesktopThemeCommandOption {
  * keyed by the id.
  */
 export type DesktopActionId =
+  | 'background'
   | 'branch'
   | 'browser'
   | 'compress'
@@ -172,6 +173,13 @@ const rpc = (
 const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   // Local client actions
   { name: '/new', description: 'Start a new desktop chat', aliases: ['/reset'], surface: action('new') },
+  {
+    name: '/background',
+    description: 'Launch a background prompt',
+    aliases: ['/bg', '/btw'],
+    surface: action('background'),
+    argumentMode: 'text'
+  },
   {
     name: '/branch',
     description: 'Branch the latest message into a new chat',

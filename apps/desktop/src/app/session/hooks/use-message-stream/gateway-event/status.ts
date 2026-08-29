@@ -41,6 +41,29 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
     return true
   }
 
+  if (event.type === 'background.complete') {
+    const text = coerceGatewayText(payload?.text).trim()
+    const taskId = coerceGatewayText(payload?.task_id).trim()
+
+    if (text && sessionId) {
+      flushQueuedDeltas(sessionId)
+      updateSessionState(sessionId, state => ({
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            id: `background-complete-${taskId || Date.now()}`,
+            role: 'system',
+            parts: [textPart(`${taskId ? `[bg ${taskId}] ` : ''}${text}`, occurredAt)],
+            timestamp: occurredAt
+          }
+        ]
+      }))
+    }
+
+    return true
+  }
+
   if (event.type === 'review.summary') {
     // Self-improvement background review saved something to memory/skills
     // and emitted a persistent summary (Python formats it as

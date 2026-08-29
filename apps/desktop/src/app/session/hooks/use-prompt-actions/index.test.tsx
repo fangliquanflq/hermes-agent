@@ -1080,6 +1080,40 @@ describe('usePromptActions exec fallback error reporting', () => {
     expect(renderedSeedTexts(seeds).some(text => text.includes('session status from slash worker'))).toBe(true)
   })
 
+  it('routes /background to prompt.background with the originating session', async () => {
+    const seeds: Record<string, unknown>[] = []
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'prompt.background') {
+        return { task_id: 'bg_123' } as never
+      }
+
+      throw new Error(`unexpected method: ${method}`)
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        activeSessionId={RUNTIME_SESSION_ID}
+        activeSessionIdRef={{ current: RUNTIME_SESSION_ID }}
+        onReady={h => (handle = h)}
+        onSeedState={s => seeds.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId="stored-origin"
+      />
+    )
+
+    await handle!.submitText('/background inspect the failing tests')
+
+    expect(requestGateway).toHaveBeenCalledWith('prompt.background', {
+      session_id: RUNTIME_SESSION_ID,
+      text: 'inspect the failing tests'
+    })
+    expect(requestGateway).not.toHaveBeenCalledWith('slash.exec', expect.anything())
+    expect(renderedSeedTexts(seeds).some(text => text.includes('bg_123'))).toBe(true)
+  })
+
   it('still reports a real command.dispatch failure for skill/quick commands', async () => {
     const seeds: Record<string, unknown>[] = []
 

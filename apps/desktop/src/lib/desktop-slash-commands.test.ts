@@ -201,6 +201,12 @@ describe('desktop slash command curation', () => {
     expect(isDesktopSlashSuggestion('/compact')).toBe(false)
   })
 
+  it('routes /background through the desktop background action', () => {
+    expect(resolveDesktopCommand('/background')?.surface).toEqual({ kind: 'action', action: 'background' })
+    expect(resolveDesktopCommand('/bg')?.surface).toEqual({ kind: 'action', action: 'background' })
+    expect(desktopSlashCommandArgumentMode('/background')).toBe('text')
+  })
+
   it('routes only stateless session commands through dedicated gateway RPCs', () => {
     const expected = {
       '/save': 'session.save',
@@ -230,7 +236,6 @@ describe('desktop slash command curation', () => {
 
   it('still routes commands without dedicated RPCs through exec()', () => {
     const execNames = [
-      '/background',
       '/debug',
       '/goal',
       '/personality',

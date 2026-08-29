@@ -491,6 +491,35 @@ export function useSlashCommand(deps: SlashCommandDeps) {
       // registry row in desktop-slash-commands.ts plus an entry here — never a
       // new branch in a dispatch ladder.
       const actionHandlers: Record<DesktopActionId, (ctx: SlashActionCtx) => Promise<void>> = {
+        background: async ctx => {
+          const resolved = await withSlashOutput(ctx)
+
+          if (!resolved) {
+            return
+          }
+
+          const { render: renderSlashOutput, sessionId } = resolved
+          const text = ctx.arg.trim()
+
+          if (!text) {
+            renderSlashOutput('/background <prompt>')
+
+            return
+          }
+
+          try {
+            const result = await requestGateway<{ task_id?: string }>('prompt.background', {
+              session_id: sessionId,
+              text
+            })
+
+            const taskId = result?.task_id?.trim()
+
+            renderSlashOutput(taskId ? `background task ${taskId} started` : 'background task started')
+          } catch (error) {
+            renderSlashOutput(`error: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        },
         new: async () => {
           startFreshSessionDraft()
         },
