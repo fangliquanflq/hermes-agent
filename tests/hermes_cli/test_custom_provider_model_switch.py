@@ -32,6 +32,42 @@ def config_home(tmp_path, monkeypatch):
 class TestCustomProviderModelSwitch:
     """Ensure _model_flow_named_custom always probes and shows menu."""
 
+    def test_builtin_providers_dict_entry_keeps_canonical_provider_id(
+        self, config_home
+    ):
+        """A built-in provider duplicated under ``providers:`` stays built-in."""
+        import yaml
+        from hermes_cli.main import _model_flow_named_custom
+
+        config_path = config_home / "config.yaml"
+        config_path.write_text(
+            "model:\n"
+            "  default: kimi-k2.7-code\n"
+            "  provider: ollama-cloud\n"
+            "providers:\n"
+            "  ollama-cloud:\n"
+            "    api: https://ollama.com/v1\n"
+            "    default_model: kimi-k2.7-code\n"
+        )
+        provider_info = {
+            "name": "Ollama Cloud",
+            "base_url": "https://ollama.com/v1",
+            "api_key": "sk-test",
+            "model": "kimi-k2.7-code",
+            "provider_key": "ollama-cloud",
+        }
+
+        with patch(
+            "hermes_cli.models.fetch_api_models", return_value=["glm-5.2"]
+        ), patch(
+            "hermes_cli.curses_ui.curses_radiolist", side_effect=ImportError
+        ), patch("builtins.input", return_value="1"), patch("builtins.print"):
+            _model_flow_named_custom({}, provider_info)
+
+        saved = yaml.safe_load(config_path.read_text()) or {}
+        assert saved["model"]["provider"] == "ollama-cloud"
+        assert saved["model"]["default"] == "glm-5.2"
+
     def test_custom_endpoint_switch_prunes_stale_model_config_pool_entry(
         self,
         config_home,

@@ -1512,7 +1512,7 @@ def _model_flow_named_custom(config, provider_info):
     Falls back to the saved model if probing fails.
     """
     from hermes_cli.main import _custom_provider_api_key_config_value, _custom_provider_base_url_config_value, _save_custom_provider
-    from hermes_cli.auth import _save_model_choice, deactivate_provider
+    from hermes_cli.auth import PROVIDER_REGISTRY, _save_model_choice, deactivate_provider
     from hermes_cli.config import load_config, normalize_extra_headers, save_config
     from hermes_cli.model_switch import (
         _entry_models_discovered,
@@ -1740,7 +1740,13 @@ def _model_flow_named_custom(config, provider_info):
         model = {"default": model} if model else {}
         cfg["model"] = model
     if provider_key:
-        model["provider"] = custom_provider_slug(name, provider_key)
+        bare_provider_key = provider_key.lower().removeprefix("custom:")
+        builtin_provider = PROVIDER_REGISTRY.get(bare_provider_key)
+        model["provider"] = (
+            builtin_provider.id
+            if builtin_provider is not None
+            else custom_provider_slug(name, provider_key)
+        )
         model.pop("base_url", None)
         model.pop("api_key", None)
     else:
