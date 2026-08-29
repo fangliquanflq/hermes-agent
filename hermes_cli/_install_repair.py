@@ -21,6 +21,7 @@ recovery will bootstrap uv on the next launch if it ever matters).
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import json
 import os
@@ -101,6 +102,122 @@ def _resolve_install_target(root: Path) -> tuple[list[str], dict | None]:
             env.pop("PYTHONHOME", None)
         return [uv_bin, "pip"], env
     return [sys.executable, "-m", "pip"], None
+
+
+def _editable_site_packages(root: Path) -> Path | None:
+    """Resolve the site-packages directory targeted by the editable install."""
+    from hermes_constants import project_venv_dir
+
+    venv_dir = project_venv_dir(root)
+    if venv_dir is not None:
+        if _is_windows():
+            candidate = venv_dir / "Lib" / "site-packages"
+            if candidate.is_dir():
+                return candidate
+        else:
+            for candidate in sorted((venv_dir / "lib").glob("python*/site-packages")):
+                if candidate.is_dir():
+                    return candidate
+    try:
+        import sysconfig
+
+        candidate = Path(sysconfig.get_path("purelib"))
+        return candidate if candidate.is_dir() else None
+    except Exception:
+        return None
+
+
+def _finder_mapping(path: Path) -> tuple[dict, dict] | None:
+    """Read setuptools' MAPPING/NAMESPACES literals without importing code."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError):
+        return None
+    values: dict[str, object] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        value = node.value
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id in {"MAPPING", "NAMESPACES"}:
+                try:
+                    values[target.id] = ast.literal_eval(value)
+                except (ValueError, TypeError):
+                    return None
+    mapping = values.get("MAPPING")
+    namespaces = values.get("NAMESPACES", {})
+    if not isinstance(mapping, dict) or not isinstance(namespaces, dict):
+        return None
+    return mapping, namespaces
+
+
+def editable_mapping_is_healthy(
+    root: Path, *, site_packages: Path | None = None
+) -> bool:
+    """Whether the active Hermes editable finder targets this source tree."""
+    root = Path(root).resolve()
+    site_packages = site_packages or _editable_site_packages(root)
+    if site_packages is None:
+        return False
+
+    finder_names: list[str] = []
+    try:
+        pth_files = sorted(site_packages.glob("__editable__*hermes_agent*.pth"))
+        for pth in pth_files:
+            body = pth.read_text(encoding="utf-8", errors="replace")
+            for token in body.replace(";", " ").split():
+                if token.startswith("__editable_") and token.endswith("_finder"):
+                    finder_names.append(token)
+    except OSError:
+        return False
+    if not finder_names:
+        return False
+
+    expected_cli = (root / "hermes_cli").resolve()
+    for finder_name in reversed(finder_names):
+        parsed = _finder_mapping(site_packages / f"{finder_name}.py")
+        if parsed is None:
+            continue
+        mapping, namespaces = parsed
+        cli_target = mapping.get("hermes_cli")
+        if not isinstance(cli_target, str):
+            continue
+        try:
+            if Path(cli_target).resolve() != expected_cli:
+                continue
+            targets = list(mapping.values())
+            targets.extend(
+                item
+                for entries in namespaces.values()
+                if isinstance(entries, list)
+                for item in entries
+            )
+            healthy = True
+            for raw_target in targets:
+                if not isinstance(raw_target, str):
+                    healthy = False
+                    break
+                target = Path(raw_target).resolve()
+                if not target.is_relative_to(root):
+                    healthy = False
+                    break
+                if not target.exists() and not target.with_suffix(".py").exists():
+                    healthy = False
+                    break
+            if healthy:
+                return True
+        except (OSError, RuntimeError):
+            continue
+    return False
+
+
+def require_healthy_editable_mapping(
+    root: Path, *, site_packages: Path | None = None
+) -> None:
+    """Refuse to declare a recovery successful over a dangling finder."""
+    if not editable_mapping_is_healthy(root, site_packages=site_packages):
+        raise RuntimeError("Hermes editable mapping is stale or points outside the source tree")
 
 
 def _venv_scripts_dir(root: Path) -> Path | None:
@@ -630,6 +747,16 @@ def run_core_install(root: Path) -> None:
             _run_install_cmd(
                 prefix + ["install", "-e", f".[{group}]"], env=env, root=root
             )
+            if not editable_mapping_is_healthy(root):
+                print(
+                    "  ⚠ Editable mapping is stale; forcing source-tree re-registration..."
+                )
+                _run_install_cmd(
+                    prefix + ["install", "--reinstall", "-e", f".[{group}]"],
+                    env=env,
+                    root=root,
+                )
+            require_healthy_editable_mapping(root)
             return
         except subprocess.CalledProcessError:
             print(
@@ -659,6 +786,17 @@ def run_core_install(root: Path) -> None:
                 "  ⚠ Skipped optional extras that still failed: "
                 + ", ".join(failed_extras)
             )
+
+        if not editable_mapping_is_healthy(root):
+            print(
+                "  ⚠ Editable mapping is stale; forcing source-tree re-registration..."
+            )
+            _run_install_cmd(
+                prefix + ["install", "--reinstall", "-e", "."],
+                env=env,
+                root=root,
+            )
+        require_healthy_editable_mapping(root)
 
 
 # ---------------------------------------------------------------------------

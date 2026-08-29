@@ -44,9 +44,57 @@ __all__ = [
 ]
 
 
-def project_root_str() -> str:
+def _editable_source_root(installed_root: str) -> str | None:
+    """Return the PEP 610 editable source for a site-packages copy.
+
+    Older Windows installs could leave a physical ``hermes_cli`` copy beside
+    an editable finder.  Resolving the project from ``__file__`` then anchored
+    updates at site-packages; a later reinstall removed that copy while the
+    finder still pointed at it (#97819).  ``direct_url.json`` is the install
+    metadata that survives that state and names the actual checkout.
+    """
+    import glob
+    import json
+    import urllib.parse
+    import urllib.request
+
+    for metadata_path in sorted(
+        glob.glob(os.path.join(installed_root, "hermes_agent-*.dist-info", "direct_url.json")),
+        reverse=True,
+    ):
+        try:
+            with open(metadata_path, encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            if metadata.get("dir_info", {}).get("editable") is not True:
+                continue
+            parsed = urllib.parse.urlsplit(str(metadata.get("url", "")))
+            if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+                continue
+            candidate = os.path.realpath(
+                urllib.request.url2pathname(urllib.parse.unquote(parsed.path))
+            )
+            pyproject = os.path.join(candidate, "pyproject.toml")
+            package_dir = os.path.join(candidate, "hermes_cli")
+            if not os.path.isdir(package_dir):
+                continue
+            import tomllib
+
+            with open(pyproject, "rb") as handle:
+                project_name = tomllib.load(handle).get("project", {}).get("name")
+            if project_name == "hermes-agent":
+                return candidate
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def project_root_str(*, package_file: str | None = None) -> str:
     """Repo root as a str — the single source for main.py's PROJECT_ROOT."""
-    return os.path.realpath(os.path.join(os.path.dirname(__file__), os.pardir))
+    package_file = package_file or __file__
+    root = os.path.realpath(os.path.join(os.path.dirname(package_file), os.pardir))
+    if os.path.basename(root).lower() in {"site-packages", "dist-packages"}:
+        return _editable_source_root(root) or root
+    return root
 
 
 def ensure_project_root_on_path() -> None:

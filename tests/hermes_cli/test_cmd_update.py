@@ -72,6 +72,15 @@ def _patch_managed_uv(request):
 
 
 @pytest.fixture(autouse=True)
+def _patch_editable_mapping_verification():
+    """Update tests mock installers, so they cannot mutate finder metadata."""
+    with patch(
+        "hermes_cli._install_repair.editable_mapping_is_healthy", return_value=True
+    ), patch("hermes_cli._install_repair.require_healthy_editable_mapping"):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _patch_gateway_discovery():
     """Keep cmd_update's gateway auto-restart phase off this machine's gateways.
 

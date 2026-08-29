@@ -150,7 +150,9 @@ def _should_skip_external_secret_sources() -> bool:
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    from hermes_cli._startup_fast import project_root_str
+
+    return Path(project_root_str())
 
 
 def _pid_is_running(pid: int) -> bool:

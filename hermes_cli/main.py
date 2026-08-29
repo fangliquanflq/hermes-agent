@@ -10090,6 +10090,7 @@ def _install_python_dependencies_with_optional_fallback(
     shared helper for the remaining callers).
     """
     scripts_dir = _venv_scripts_dir() if _is_windows() else None
+    from hermes_cli import _install_repair as _install_repair_mod
 
     # A pip / site-packages install has no PROJECT_ROOT/venv; the caller still
     # passes VIRTUAL_ENV=PROJECT_ROOT/venv, which does not exist. uv would fail
@@ -10134,6 +10135,13 @@ def _install_python_dependencies_with_optional_fallback(
     try:
         _install(["install", "-e", f".[{group}]"])
         _verify_console_scripts_installed(install_cmd_prefix, env=env)
+        if not _install_repair_mod.editable_mapping_is_healthy(PROJECT_ROOT):
+            print(
+                "  ⚠ Verification: editable mapping is stale; forcing "
+                "source-tree re-registration..."
+            )
+            _install(["install", "--reinstall", "-e", f".[{group}]"])
+        _install_repair_mod.require_healthy_editable_mapping(PROJECT_ROOT)
         return
     except subprocess.CalledProcessError:
         print(
@@ -10172,6 +10180,13 @@ def _install_python_dependencies_with_optional_fallback(
     # downstream.
     _verify_core_dependencies_installed(install_cmd_prefix, env=env, group=group)
     _verify_console_scripts_installed(install_cmd_prefix, env=env)
+    if not _install_repair_mod.editable_mapping_is_healthy(PROJECT_ROOT):
+        print(
+            "  ⚠ Verification: editable mapping is stale; forcing "
+            "source-tree re-registration..."
+        )
+        _install(["install", "--reinstall", "-e", "."])
+    _install_repair_mod.require_healthy_editable_mapping(PROJECT_ROOT)
 
 
 def _load_console_script_names() -> list[str]:

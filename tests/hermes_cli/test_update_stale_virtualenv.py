@@ -26,6 +26,13 @@ class StaleVirtualEnvTest(unittest.TestCase):
 
         with mock.patch.object(main_mod, "_run_quarantined_install", fake_quarantine), \
              mock.patch.object(main_mod, "_verify_console_scripts_installed", fake_verify), \
+             mock.patch(
+                 "hermes_cli._install_repair.editable_mapping_is_healthy",
+                 return_value=True,
+             ), \
+             mock.patch(
+                 "hermes_cli._install_repair.require_healthy_editable_mapping"
+             ), \
              mock.patch.object(main_mod, "_venv_scripts_dir", return_value=None), \
              mock.patch.object(main_mod, "_is_windows", return_value=is_windows), \
              mock.patch.object(main_mod.sys, "executable", fake_executable), \

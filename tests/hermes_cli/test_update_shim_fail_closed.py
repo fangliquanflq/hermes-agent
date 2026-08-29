@@ -138,6 +138,8 @@ def test_update_sync_installs_are_strict(windows, tmp_path, monkeypatch):
         cli_main, "_verify_core_dependencies_installed",
         lambda prefix, env=None, group="all": None,
     )
+    monkeypatch.setattr(ir, "editable_mapping_is_healthy", lambda _root: True)
+    monkeypatch.setattr(ir, "require_healthy_editable_mapping", lambda _root: None)
     cli_main._install_python_dependencies_with_optional_fallback(["uv", "pip"])
     assert seen["strict"] is True
 
