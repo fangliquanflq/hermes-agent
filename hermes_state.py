@@ -3928,7 +3928,7 @@ def _connect_tracked_db(path, tracking_path=None, **kwargs):
 def is_zeroed_state_db(
     path: Path, *, probe_bytes: int = 100, force: bool = False
 ) -> bool:
-    """Detect the #68474 zeroed state.db signature (size>0, NUL header).
+    """Detect the #68474 zeroed state.db signature (empty or NUL header).
 
     Byte-level probe, so it is only safe BEFORE any connection to *path*
     exists in this process: ``close()`` cancels every POSIX advisory lock the
@@ -3952,14 +3952,16 @@ def is_zeroed_state_db(
         size = path.stat().st_size
     except OSError:
         return False
-    if size <= 0:
-        return False
     from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
 
     head = read_header_bytes_preopen(
         path, length=max(16, probe_bytes), force=force
     )
-    if not head or head.startswith(b"SQLite format 3"):
+    if head is None:
+        return False
+    if size == 0:
+        return head == b""
+    if head.startswith(b"SQLite format 3"):
         return False
     return all(byte == 0 for byte in head)
 
@@ -4665,10 +4667,10 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             if not read_only:
                 preflight_db_writability(self.db_path, db_label="state.db")
 
-            # #68474: zeroed state.db (size>0, all-NUL header) used to fail as a
-            # generic "file is not a database" with no recovery path. Quarantine
-            # the bytes (do not delete) and continue so a fresh DB can open;
-            # point the operator at pre-update snapshots.
+            # #68474: zeroed state.db (empty or an all-NUL header) used to fail
+            # silently or as a generic "file is not a database". Quarantine the
+            # file (do not delete it) and continue so a fresh DB can open; point
+            # the operator at pre-update snapshots.
             if (
                 not read_only
                 and self.db_path.exists()

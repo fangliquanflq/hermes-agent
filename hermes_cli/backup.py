@@ -441,23 +441,24 @@ def is_zeroed_sqlite_file(
 ) -> bool:
     """True when *path* looks like the #68474 zeroed-state.db signature.
 
-    Signature: size > 0, first *probe_bytes* are all NUL (no ``SQLite format 3``
-    header). Used at SessionDB open and for snapshot diagnostics so a silent
-    all-zero file becomes a guided recovery instead of a generic failure.
+    Signature: an existing empty file, or a non-empty file whose first
+    *probe_bytes* are all NUL (no ``SQLite format 3`` header). Used at
+    SessionDB open and for snapshot diagnostics so a silent all-zero file
+    becomes a guided recovery instead of a generic failure.
     """
     try:
         size = path.stat().st_size
     except OSError:
-        return False
-    if size <= 0:
         return False
     from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
 
     head = read_header_bytes_preopen(
         path, length=max(16, probe_bytes), force=force
     )
-    if not head:
+    if head is None:
         return False
+    if size == 0:
+        return head == b""
     if head.startswith(b"SQLite format 3"):
         return False
     return all(byte == 0 for byte in head)

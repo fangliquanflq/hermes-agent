@@ -1186,6 +1186,15 @@ class TestSafeCopyDb:
         p.write_bytes(bytes(4096))  # all NULs
         assert is_zeroed_sqlite_file(p) is True
 
+    def test_is_zeroed_sqlite_file_distinguishes_empty_from_absent(self, tmp_path):
+        from hermes_cli.backup import is_zeroed_sqlite_file
+
+        p = tmp_path / "state.db"
+        assert is_zeroed_sqlite_file(p) is False
+
+        p.touch()
+        assert is_zeroed_sqlite_file(p) is True
+
 
 # ---------------------------------------------------------------------------
 # Quick state snapshot tests

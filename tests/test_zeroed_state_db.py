@@ -41,6 +41,23 @@ def test_sessiondb_opens_fresh_after_zeroed_quarantine(tmp_path, monkeypatch):
         sdb.close()
 
 
+def test_sessiondb_quarantines_existing_empty_database(tmp_path, monkeypatch):
+    import hermes_state as hs
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    db = tmp_path / "state.db"
+    db.touch()
+
+    sdb = hs.SessionDB(db_path=db)
+    try:
+        backups = list(tmp_path.glob("state.db.zeroed-*.bak"))
+        assert len(backups) == 1
+        assert backups[0].stat().st_size == 0
+        assert db.stat().st_size > 0
+    finally:
+        sdb.close()
+
+
 def test_concurrent_quarantine_no_clobber(tmp_path):
     """#68805: two concurrent startups must not race on quarantine.
 
