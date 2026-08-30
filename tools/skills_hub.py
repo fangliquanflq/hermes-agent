@@ -364,7 +364,40 @@ class GitHubAuth:
     def __init__(self):
         self._cached_token: Optional[str] = None
         self._cached_method: Optional[str] = None
+        self._cached_token_source: Optional[str] = None
         self._app_token_expiry: float = 0
+        self._rejected_tokens: set[str] = set()
+        self._rejected_token_sources: set[str] = set()
+        self._invalid_env_tokens: List[str] = []
+
+    @property
+    def invalid_env_tokens(self) -> Tuple[str, ...]:
+        """Environment credential names rejected by GitHub in this flow."""
+        return tuple(self._invalid_env_tokens)
+
+    def reject_current_token(self) -> bool:
+        """Discard a token rejected by GitHub so the next method can run."""
+        token = self._cached_token
+        if not token:
+            return False
+
+        self._rejected_tokens.add(token)
+        if self._cached_token_source:
+            self._rejected_token_sources.add(self._cached_token_source)
+        if self._cached_method == "pat" and self._cached_token_source:
+            source = self._cached_token_source
+            if source not in self._invalid_env_tokens:
+                self._invalid_env_tokens.append(source)
+            logger.warning(
+                "GitHub rejected %s; retrying with the next authentication method",
+                source,
+            )
+
+        self._cached_token = None
+        self._cached_method = None
+        self._cached_token_source = None
+        self._app_token_expiry = 0
+        return True
 
     def get_headers(self) -> Dict[str, str]:
         """Return authorization headers for GitHub API requests."""
@@ -390,24 +423,40 @@ class GitHubAuth:
 
         # 1. Environment variable (profile-scoped under a multiplexed gateway)
         from agent.secret_scope import get_secret
-        token = get_secret("GITHUB_TOKEN") or get_secret("GH_TOKEN")
-        if token:
+        env_tokens = (
+            ("GITHUB_TOKEN", get_secret("GITHUB_TOKEN")),
+            ("GH_TOKEN", get_secret("GH_TOKEN")),
+        )
+        for source, token in env_tokens:
+            if (
+                not token
+                or token in self._rejected_tokens
+                or source in self._rejected_token_sources
+            ):
+                continue
             self._cached_token = token
             self._cached_method = "pat"
+            self._cached_token_source = source
             return token
 
         # 2. gh CLI
-        token = self._try_gh_cli()
-        if token:
+        token = None
+        if "gh auth token" not in self._rejected_token_sources:
+            token = self._try_gh_cli()
+        if token and token not in self._rejected_tokens:
             self._cached_token = token
             self._cached_method = "gh-cli"
+            self._cached_token_source = "gh auth token"
             return token
 
         # 3. GitHub App
-        token = self._try_github_app()
-        if token:
+        token = None
+        if "GitHub App" not in self._rejected_token_sources:
+            token = self._try_github_app()
+        if token and token not in self._rejected_tokens:
             self._cached_token = token
             self._cached_method = "github-app"
+            self._cached_token_source = "GitHub App"
             self._app_token_expiry = time.time() + 3500  # ~58 min (tokens last 1 hour)
             return token
 
@@ -816,16 +865,10 @@ class GitHubSource(SkillSource):
         if repo in self._tree_cache:
             return self._tree_cache[repo]
 
-        headers = self.auth.get_headers()
-
         # Resolve default branch
         try:
-            resp = httpx.get(
-                f"https://api.github.com/repos/{repo}",
-                headers=headers, timeout=15, follow_redirects=True,
-            )
-            if resp.status_code != 200:
-                self._check_rate_limit_response(resp)
+            resp = self._github_get(f"https://api.github.com/repos/{repo}")
+            if resp is None or resp.status_code != 200:
                 return None
             default_branch = resp.json().get("default_branch", "main")
         except (httpx.HTTPError, ValueError):
@@ -833,13 +876,12 @@ class GitHubSource(SkillSource):
 
         # Fetch recursive tree
         try:
-            resp = httpx.get(
+            resp = self._github_get(
                 f"https://api.github.com/repos/{repo}/git/trees/{default_branch}",
                 params={"recursive": "1"},
-                headers=headers, timeout=30, follow_redirects=True,
+                timeout=30,
             )
-            if resp.status_code != 200:
-                self._check_rate_limit_response(resp)
+            if resp is None or resp.status_code != 200:
                 return None
             tree_data = resp.json()
             if tree_data.get("truncated"):
@@ -892,18 +934,37 @@ class GitHubSource(SkillSource):
         ``_check_rate_limit_response`` so the build can fail loud instead of
         silently shipping an index with the GitHub sources dropped to zero.
         """
-        hdrs = headers if headers is not None else self.auth.get_headers()
+        extra_headers = dict(headers or {})
+        extra_headers.pop("Authorization", None)
         backoff = 1.0
+        auth_fallbacks = 0
         last_resp: Optional["httpx.Response"] = None
         for attempt in range(max_retries):
-            try:
-                resp = httpx.get(
-                    url, params=params, headers=hdrs,
-                    timeout=timeout, follow_redirects=True,
-                )
-            except httpx.HTTPError as e:
+            transport_error = None
+            while True:
+                request_headers = {**self.auth.get_headers(), **extra_headers}
+                try:
+                    resp = httpx.get(
+                        url, params=params, headers=request_headers,
+                        timeout=timeout, follow_redirects=True,
+                    )
+                except httpx.HTTPError as exc:
+                    transport_error = exc
+                    break
+
+                if (
+                    resp.status_code == 401
+                    and "Authorization" in request_headers
+                    and auth_fallbacks < 4
+                    and self.auth.reject_current_token()
+                ):
+                    auth_fallbacks += 1
+                    continue
+                break
+
+            if transport_error is not None:
                 logger.debug("GitHub GET %s failed (attempt %d/%d): %s",
-                             url, attempt + 1, max_retries, e)
+                             url, attempt + 1, max_retries, transport_error)
                 if attempt < max_retries - 1:
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 30.0)

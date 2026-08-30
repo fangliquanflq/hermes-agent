@@ -32,6 +32,65 @@ from tools.skills_hub import (
 
 
 # ---------------------------------------------------------------------------
+# GitHub authentication fallback
+# ---------------------------------------------------------------------------
+
+
+class TestGitHubAuthenticationFallback:
+    def test_401_from_env_token_retries_with_gh_cli(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.secret_scope.get_secret",
+            lambda name: "dead-env-token" if name == "GITHUB_TOKEN" else None,
+        )
+        auth = GitHubAuth()
+        monkeypatch.setattr(auth, "_try_gh_cli", lambda: "working-gh-token")
+        monkeypatch.setattr(auth, "_try_github_app", lambda: None)
+        source = GitHubSource(auth=auth)
+
+        seen_headers = []
+
+        def fake_get(_url, **kwargs):
+            seen_headers.append(kwargs["headers"])
+            status = 401 if len(seen_headers) == 1 else 200
+            return MagicMock(status_code=status, headers={})
+
+        monkeypatch.setattr("tools.skills_hub.httpx.get", fake_get)
+
+        response = source._github_get("https://api.github.com/rate_limit")
+
+        assert response.status_code == 200
+        assert seen_headers[0]["Authorization"] == "token dead-env-token"
+        assert seen_headers[1]["Authorization"] == "token working-gh-token"
+        assert auth.invalid_env_tokens == ("GITHUB_TOKEN",)
+
+    def test_401_from_env_token_retries_anonymously_for_public_repo(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.secret_scope.get_secret",
+            lambda name: "dead-env-token" if name == "GITHUB_TOKEN" else None,
+        )
+        auth = GitHubAuth()
+        monkeypatch.setattr(auth, "_try_gh_cli", lambda: None)
+        monkeypatch.setattr(auth, "_try_github_app", lambda: None)
+        source = GitHubSource(auth=auth)
+
+        seen_headers = []
+
+        def fake_get(_url, **kwargs):
+            seen_headers.append(kwargs["headers"])
+            status = 401 if len(seen_headers) == 1 else 200
+            return MagicMock(status_code=status, headers={})
+
+        monkeypatch.setattr("tools.skills_hub.httpx.get", fake_get)
+
+        response = source._github_get("https://api.github.com/rate_limit")
+
+        assert response.status_code == 200
+        assert seen_headers[0]["Authorization"] == "token dead-env-token"
+        assert "Authorization" not in seen_headers[1]
+        assert auth.auth_method() == "anonymous"
+
+
+# ---------------------------------------------------------------------------
 # GitHubSource._parse_frontmatter_quick
 # ---------------------------------------------------------------------------
 

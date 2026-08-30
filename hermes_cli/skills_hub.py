@@ -537,7 +537,7 @@ def do_install(identifier: str, category: str = "", force: bool = False,
                console: Optional[Console] = None, skip_confirm: bool = False,
                invalidate_cache: bool = True,
                name_override: str = "",
-               source_id: Optional[str] = None) -> None:
+               source_id: Optional[str] = None) -> bool:
     """Fetch, quarantine, scan, confirm, and install a skill.
 
     ``name_override`` lets non-interactive callers (slash commands, gateway,
@@ -598,7 +598,15 @@ def do_install(identifier: str, category: str = "", force: bool = False,
             for src in sources
         )
         c.print(f"[bold red]Error:[/] Could not fetch '{identifier}' from any source.")
-        if rate_limited:
+        invalid_env_tokens = getattr(auth, "invalid_env_tokens", ())
+        if invalid_env_tokens:
+            names = ", ".join(invalid_env_tokens)
+            c.print(
+                f"[yellow]Hint:[/] GitHub rejected {names}. Remove or replace "
+                f"the stale credential in [bold]{display_hermes_home()}/.env[/]. "
+                "Hermes also retried the available GitHub authentication fallbacks.\n"
+            )
+        elif rate_limited:
             c.print(
                 "[yellow]Hint:[/] GitHub API rate limit exhausted "
                 "(unauthenticated: 60 requests/hour).\n"
@@ -608,7 +616,7 @@ def do_install(identifier: str, category: str = "", force: bool = False,
             )
         else:
             c.print()
-        return
+        return False
 
     # URL-sourced skills may arrive with an empty name when SKILL.md has no
     # ``name:`` in frontmatter AND the URL path doesn't yield a valid
@@ -843,6 +851,8 @@ def do_install(identifier: str, category: str = "", force: bool = False,
     else:
         c.print("[dim]Skill will be available in your next session.[/]")
         c.print("[dim]Use /reset to start a new session now, or --now to activate immediately (invalidates prompt cache).[/]\n")
+
+    return True
 
 
 def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
@@ -1820,9 +1830,15 @@ def skills_command(args) -> None:
         do_search(args.query, source=args.source, limit=args.limit,
                   as_json=getattr(args, "json", False))
     elif action == "install":
-        do_install(args.identifier, category=args.category, force=args.force,
-                   skip_confirm=getattr(args, "yes", False),
-                   name_override=getattr(args, "name", "") or "")
+        installed = do_install(
+            args.identifier,
+            category=args.category,
+            force=args.force,
+            skip_confirm=getattr(args, "yes", False),
+            name_override=getattr(args, "name", "") or "",
+        )
+        if not installed:
+            raise SystemExit(1)
     elif action == "inspect":
         do_inspect(args.identifier)
     elif action == "list":

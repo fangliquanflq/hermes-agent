@@ -5,7 +5,14 @@ import pytest
 from rich.console import Console
 
 from cli import ChatConsole
-from hermes_cli.skills_hub import do_check, do_install, do_list, do_update, handle_skills_slash
+from hermes_cli.skills_hub import (
+    do_check,
+    do_install,
+    do_list,
+    do_update,
+    handle_skills_slash,
+    skills_command,
+)
 
 
 class _DummyLockFile:
@@ -101,6 +108,48 @@ def _capture_update(monkeypatch, results) -> tuple[str, list[tuple[str, str, boo
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_do_install_reports_rejected_env_token_and_failure(monkeypatch, hub_env):
+    import tools.skills_hub as hub
+
+    class FailedSource:
+        def inspect(self, _identifier):
+            return None
+
+        def fetch(self, _identifier):
+            return None
+
+    auth = type("Auth", (), {"invalid_env_tokens": ("GITHUB_TOKEN",)})()
+    monkeypatch.setattr(hub, "GitHubAuth", lambda: auth)
+    monkeypatch.setattr(hub, "create_source_router", lambda _auth: [FailedSource()])
+
+    sink = StringIO()
+    console = Console(file=sink, force_terminal=False, color_system=None)
+
+    assert do_install("owner/repo/skills/example", console=console) is False
+    output = sink.getvalue()
+    assert "GitHub rejected GITHUB_TOKEN" in output
+    assert ".env" in output
+
+
+def test_skills_command_exits_nonzero_when_install_fails(monkeypatch):
+    import hermes_cli.skills_hub as cli_hub
+
+    args = type("Args", (), {
+        "skills_action": "install",
+        "identifier": "owner/repo/skills/example",
+        "category": "",
+        "force": False,
+        "yes": True,
+        "name": "",
+    })()
+    monkeypatch.setattr(cli_hub, "do_install", lambda *args, **kwargs: False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        skills_command(args)
+
+    assert exc_info.value.code == 1
 
 
 
