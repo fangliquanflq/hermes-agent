@@ -124,6 +124,80 @@ def test_dispatch_returns_immediately_without_blocking():
     gate.set()
 
 
+def test_batch_dispatch_returns_handle_when_monitor_start_fails(monkeypatch):
+    """Once executor submission succeeds, later setup failures are warnings."""
+    gate = threading.Event()
+    started = threading.Event()
+
+    def runner():
+        started.set()
+        gate.wait(timeout=60)
+        return {"results": [{"status": "completed", "summary": "done"}]}
+
+    monkeypatch.setattr(
+        ad,
+        "_ensure_stale_monitor",
+        lambda: (_ for _ in ()).throw(RuntimeError("monitor unavailable")),
+    )
+
+    res = ad.dispatch_async_delegation_batch(
+        goals=["background task"], context=None, toolsets=None, role="leaf",
+        model="m", session_key="owner", parent_session_id="parent-session",
+        runner=runner, max_async_children=1,
+        progress_fn=lambda: ((0, None), False),
+    )
+
+    try:
+        assert started.wait(timeout=2)
+        assert res["status"] == "dispatched"
+        assert res["delegation_id"].startswith("deleg_")
+        assert "warning" in res
+        assert ad.active_count() == 1
+    finally:
+        gate.set()
+
+
+def test_batch_persistence_failure_rejects_without_starting_runner(monkeypatch):
+    started = threading.Event()
+    monkeypatch.setattr(
+        ad,
+        "_persist_dispatch",
+        lambda record: (_ for _ in ()).throw(OSError("disk I/O error")),
+    )
+
+    res = ad.dispatch_async_delegation_batch(
+        goals=["must not start"], context=None, toolsets=None, role="leaf",
+        model="m", session_key="owner",
+        runner=lambda: started.set() or {"results": []},
+        max_async_children=1,
+    )
+
+    assert res["status"] == "rejected"
+    assert "persist" in res["error"].lower()
+    assert not started.is_set()
+    assert ad.active_count() == 0
+
+
+def test_dispatched_payload_serialization_preserves_handle_on_metadata_failure():
+    import tools.delegate_tool as dt
+
+    raw = dt._serialize_dispatched_payload(
+        {
+            "status": "dispatched",
+            "mode": "background",
+            "count": 1,
+            "delegation_id": "deleg_serialization",
+            "goals": ["task"],
+            "live_transcripts": [object()],
+        }
+    )
+
+    parsed = json.loads(raw)
+    assert parsed["status"] == "dispatched"
+    assert parsed["delegation_id"] == "deleg_serialization"
+    assert "metadata" in parsed["warning"].lower()
+
+
 def test_async_executor_workers_are_daemon_threads():
     gate = threading.Event()
 
@@ -621,6 +695,45 @@ def test_delegate_task_background_routes_async_and_does_not_block(monkeypatch):
     text = format_process_notification(evt)
     assert text is not None
     assert "the real task" in text
+
+
+def test_delegate_task_does_not_run_inline_after_persistence_rejection(monkeypatch):
+    """Infrastructure rejection is terminal, not a hidden sync retry."""
+    from unittest.mock import MagicMock
+    import tools.delegate_tool as dt
+
+    parent = MagicMock()
+    parent._delegate_depth = 0
+    parent.session_id = "sess"
+    parent._interrupt_requested = False
+    parent._active_children = []
+    parent._active_children_lock = None
+    fake_child = MagicMock()
+    fake_child._delegate_role = "leaf"
+    fake_child._subagent_id = "s1"
+    ran = threading.Event()
+    creds = {
+        "model": "m", "provider": None, "base_url": None, "api_key": None,
+        "api_mode": None, "command": None, "args": None,
+    }
+
+    monkeypatch.setattr(dt, "_build_child_agent", lambda **kw: fake_child)
+    monkeypatch.setattr(dt, "_resolve_delegation_credentials", lambda *a, **k: creds)
+    monkeypatch.setattr(dt, "_run_single_child", lambda *a, **k: ran.set())
+    monkeypatch.setattr(
+        ad,
+        "_persist_dispatch",
+        lambda record: (_ for _ in ()).throw(OSError("disk I/O error")),
+    )
+
+    parsed = json.loads(
+        dt.delegate_task(goal="must not retry inline", background=True, parent_agent=parent)
+    )
+
+    assert parsed["status"] == "rejected"
+    assert parsed["mode"] == "background"
+    assert "persist" in parsed["error"].lower()
+    assert not ran.is_set()
 
 
 def test_delegate_task_background_uses_live_tui_agent_session_id(monkeypatch):

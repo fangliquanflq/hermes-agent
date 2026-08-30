@@ -134,6 +134,41 @@ def test_list_empty_registry_has_note():
     assert "note" in out
 
 
+def test_list_recovers_running_batch_before_children_register():
+    """The async registry remains a control-plane visibility fallback."""
+    from tools import async_delegation as ad
+
+    parent = _StubParent()
+    parent.session_id = "owner-session"
+    delegation_id = "deleg_hidden_batch"
+    with ad._records_lock:
+        ad._records[delegation_id] = {
+            "delegation_id": delegation_id,
+            "parent_session_id": parent.session_id,
+            "session_key": parent.session_id,
+            "status": "running",
+            "goal": "2 parallel subagents",
+            "goals": ["one", "two"],
+            "is_batch": True,
+            "dispatched_at": 1000.0,
+        }
+    try:
+        out = json.loads(_handle_control_action("list", None, None, parent))
+        assert out["count"] == 1
+        assert out["subagents"] == []
+        assert out["delegations"] == [
+            {
+                "delegation_id": delegation_id,
+                "goal": "2 parallel subagents",
+                "status": "running",
+                "count": 2,
+            }
+        ]
+    finally:
+        with ad._records_lock:
+            ad._records.pop(delegation_id, None)
+
+
 # ---------------------------------------------------------------------------
 # action='steer'
 # ---------------------------------------------------------------------------
@@ -240,6 +275,40 @@ def test_stop_unknown_id_mentions_completion_path():
     out = _handle_control_action("stop", "sid-gone", None, _StubParent())
     assert "No live subagent" in out
     assert "completion message" in out
+
+
+def test_stop_accepts_owned_async_delegation_handle_before_child_registration():
+    from tools import async_delegation as ad
+
+    parent = _StubParent()
+    parent.session_id = "owner-session"
+    interrupted = []
+    delegation_id = "deleg_control_fallback"
+    with ad._records_lock:
+        ad._records[delegation_id] = {
+            "delegation_id": delegation_id,
+            "parent_session_id": parent.session_id,
+            "session_key": parent.session_id,
+            "status": "running",
+            "goal": "background batch",
+            "goals": ["one", "two"],
+            "is_batch": True,
+            "interrupt_fn": lambda: interrupted.append(delegation_id),
+            "dispatched_at": 1000.0,
+        }
+    try:
+        out = json.loads(
+            _handle_control_action("stop", delegation_id, None, parent)
+        )
+        assert out == {
+            "action": "stop",
+            "delegation_id": delegation_id,
+            "status": "interrupt_requested",
+        }
+        assert interrupted == [delegation_id]
+    finally:
+        with ad._records_lock:
+            ad._records.pop(delegation_id, None)
 
 
 # ---------------------------------------------------------------------------

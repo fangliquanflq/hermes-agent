@@ -475,6 +475,16 @@ def _handle_control_action(
     *parent_agent* — the same registry the TUI overlay drives, but scoped so
     a conversation can only control its own spawn tree.
     """
+    def _owns_async_delegation(record: Dict[str, Any]) -> bool:
+        parent_sid = str(getattr(parent_agent, "session_id", "") or "")
+        owner_sid = str(record.get("parent_session_id") or "")
+        if not parent_sid or not owner_sid:
+            return False
+        return _resolve_session_lineage(owner_sid, parent_agent) in {
+            parent_sid,
+            _resolve_session_lineage(parent_sid, parent_agent),
+        }
+
     if action == "list":
         with _active_subagents_lock:
             records = list(_active_subagents.values())
@@ -500,12 +510,52 @@ def _handle_control_action(
                     "live_transcript": getattr(agent, "_live_transcript_path", None),
                 }
             )
+        # The async registry accepts a detached batch before its worker enters
+        # _run_single_child and registers children above. Reconcile that
+        # authoritative record so a post-submit caller error cannot hide live
+        # work or lose its delegation handle.
+        owned_records = [r for r in records if _owns_subagent_record(r, parent_agent)]
+        registered_delegation_ids = {
+            str(r.get("delegation_id"))
+            for r in owned_records
+            if r.get("delegation_id")
+        }
+        delegations = []
+        if getattr(parent_agent, "session_id", None):
+            try:
+                from tools.async_delegation import list_async_delegations
+
+                for record in list_async_delegations():
+                    delegation_id = str(record.get("delegation_id") or "")
+                    if (
+                        not delegation_id
+                        or delegation_id in registered_delegation_ids
+                        or record.get("status") not in {"running", "stalling", "finalizing"}
+                    ):
+                        continue
+                    if not _owns_async_delegation(record):
+                        continue
+                    goals = record.get("goals")
+                    delegations.append(
+                        {
+                            "delegation_id": delegation_id,
+                            "goal": record.get("goal"),
+                            "status": record.get("status"),
+                            "count": len(goals) if isinstance(goals, list) else 1,
+                        }
+                    )
+            except Exception:
+                logger.warning(
+                    "Could not reconcile async delegations for action=list",
+                    exc_info=True,
+                )
         payload: Dict[str, Any] = {
             "action": "list",
-            "count": len(entries),
+            "count": len(entries) + len(delegations),
             "subagents": entries,
+            "delegations": delegations,
         }
-        if not entries:
+        if not entries and not delegations:
             payload["note"] = (
                 "No live subagents right now. Children that already finished "
                 "have delivered (or will deliver) their results as normal "
@@ -522,6 +572,38 @@ def _handle_control_action(
         )
     with _active_subagents_lock:
         record = _active_subagents.get(sid)
+    if record is None and action == "stop":
+        try:
+            from tools.async_delegation import (
+                interrupt_delegation,
+                list_async_delegations,
+            )
+
+            async_record = next(
+                (
+                    item
+                    for item in list_async_delegations()
+                    if item.get("delegation_id") == sid
+                    and item.get("status") in {"running", "stalling", "finalizing"}
+                    and _owns_async_delegation(item)
+                ),
+                None,
+            )
+            if async_record is not None and interrupt_delegation(sid):
+                return json.dumps(
+                    {
+                        "action": "stop",
+                        "delegation_id": sid,
+                        "status": "interrupt_requested",
+                    },
+                    ensure_ascii=False,
+                )
+        except Exception:
+            logger.warning(
+                "Could not resolve async delegation %s for action=stop",
+                sid,
+                exc_info=True,
+            )
     if record is None or not _owns_subagent_record(record, parent_agent):
         return tool_error(
             f"No live subagent '{sid}' in this conversation's spawn tree. It "
@@ -580,6 +662,31 @@ def _handle_control_action(
         )
 
     return tool_error(f"Unknown action '{action}'. Use spawn, list, steer, or stop.")
+
+
+def _serialize_dispatched_payload(payload: Dict[str, Any]) -> str:
+    """Serialize an accepted dispatch without ever losing its public handle."""
+    try:
+        return json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        delegation_id = str(payload.get("delegation_id") or "")
+        logger.error(
+            "Async delegation %s accepted but response metadata was not serializable: %s",
+            delegation_id,
+            exc,
+        )
+        fallback = {
+            "status": "dispatched",
+            "mode": "background",
+            "count": int(payload.get("count") or 0),
+            "delegation_id": delegation_id,
+            "goals": [str(goal) for goal in (payload.get("goals") or [])],
+            "warning": (
+                "Delegation is running, but some response metadata could not be "
+                "serialized. Use action='list' with this delegation_id to inspect it."
+            ),
+        }
+        return json.dumps(fallback, ensure_ascii=False)
 
 
 def _extract_output_tail(
@@ -4341,15 +4448,51 @@ def delegate_task(
                     "task). Read or `tail -f` these paths at any time to watch "
                     "a child work while it runs."
                 )
-            return json.dumps(payload, ensure_ascii=False)
+            if dispatch.get("warning"):
+                payload["warning"] = dispatch["warning"]
+            return _serialize_dispatched_payload(payload)
 
-        # Pool at capacity / schedule failure — children are still attached
-        # (we detach above only on the parent list, but the async unit was
-        # never accepted, so re-attaching isn't needed: we just run inline).
+        dispatch_error = str(dispatch.get("error") or "rejected")
+        if not dispatch_error.startswith("Async delegation capacity reached"):
+            # Persistence/executor rejection happens before worker submission.
+            # Mark every pre-created live artifact terminal and return the
+            # rejection; silently running inline would turn an infrastructure
+            # failure into an unrequested second execution path.
+            rejected_results = []
+            for _idx, _task, _child in children:
+                entry = {
+                    "task_index": _idx,
+                    "status": "rejected",
+                    "summary": None,
+                    "error": dispatch_error,
+                }
+                rejected_results.append(entry)
+                _writer = live_writers[_idx] if _idx < len(live_writers) else None
+                if _writer is not None:
+                    try:
+                        _writer.finalize(entry)
+                    except Exception:
+                        logger.debug("Live transcript rejection finalize failed", exc_info=True)
+            update_manifest_statuses(live_deleg_id, rejected_results)
+            return json.dumps(
+                {
+                    "status": "rejected",
+                    "mode": "background",
+                    "delegation_id": live_deleg_id,
+                    "error": dispatch_error,
+                    "note": (
+                        "The background delegation was rejected before executor "
+                        "submission; no detached child is running."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
+        # Pool at capacity — run inline instead of queueing unbounded work.
         logger.info(
             "delegate_task: async pool at capacity (%s); running the whole "
             "batch synchronously instead.",
-            dispatch.get("error", "rejected"),
+            dispatch_error,
         )
         _cap_result = _execute_and_aggregate()
         if isinstance(_cap_result, dict):

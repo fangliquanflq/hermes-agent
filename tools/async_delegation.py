@@ -704,6 +704,42 @@ def _new_delegation_id() -> str:
     return f"deleg_{uuid.uuid4().hex[:8]}"
 
 
+def _discard_unstarted_dispatch(delegation_id: str) -> None:
+    """Remove a dispatch that was never submitted to the executor."""
+    with _records_lock:
+        _records.pop(delegation_id, None)
+    try:
+        _delete_durable_delegation(delegation_id)
+    except Exception:
+        # The persistence failure that led here may also make DELETE fail.
+        # No worker has been submitted, so in-memory removal is sufficient to
+        # preserve the rejected-means-not-running contract in this process.
+        logger.warning(
+            "Could not remove rejected async delegation %s from durable state",
+            delegation_id,
+            exc_info=True,
+        )
+
+
+def _persist_before_submit(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Persist a reserved record, or reject it before any worker can run."""
+    try:
+        _persist_dispatch(record)
+    except Exception as exc:
+        delegation_id = record["delegation_id"]
+        _discard_unstarted_dispatch(delegation_id)
+        logger.error(
+            "Rejected async delegation %s because dispatch persistence failed: %s",
+            delegation_id,
+            exc,
+        )
+        return {
+            "status": "rejected",
+            "error": f"Failed to persist async delegation before scheduling: {exc}",
+        }
+    return None
+
+
 def _prune_completed_locked() -> None:
     """Drop the oldest completed records beyond the retention cap.
 
@@ -853,8 +889,17 @@ def dispatch_async_delegation(
             }
         _records[delegation_id] = record
 
-    _persist_dispatch(record)
-    executor = _get_executor(max_async_children)
+    persistence_error = _persist_before_submit(record)
+    if persistence_error is not None:
+        return persistence_error
+    try:
+        executor = _get_executor(max_async_children)
+    except Exception as exc:
+        _discard_unstarted_dispatch(delegation_id)
+        return {
+            "status": "rejected",
+            "error": f"Failed to initialize async delegation executor: {exc}",
+        }
 
     def _worker() -> None:
         result: Dict[str, Any] = {}
@@ -880,21 +925,33 @@ def dispatch_async_delegation(
         # get_hermes_home() under the right profile.
         executor.submit(propagate_context_to_thread(_worker))
     except Exception as exc:  # pragma: no cover — pool submit failure is rare
-        with _records_lock:
-            _records.pop(delegation_id, None)
-        _delete_durable_delegation(delegation_id)
+        _discard_unstarted_dispatch(delegation_id)
         return {
             "status": "rejected",
             "error": f"Failed to schedule async delegation: {exc}",
         }
+    warning = None
     if progress_fn is not None:
-        _ensure_stale_monitor()
+        try:
+            _ensure_stale_monitor()
+        except Exception as exc:
+            # Submission is the acceptance boundary. Preserve the handle once
+            # detached work can run, even if auxiliary monitoring is degraded.
+            warning = f"Delegation is running, but stale monitoring failed to start: {exc}"
+            logger.error(
+                "Async delegation %s accepted without stale monitoring: %s",
+                delegation_id,
+                exc,
+            )
 
     logger.info(
         "Dispatched async delegation %s (session_key=%s): %s",
         delegation_id, session_key or "<cli>", (goal or "")[:80],
     )
-    return {"status": "dispatched", "delegation_id": delegation_id}
+    response = {"status": "dispatched", "delegation_id": delegation_id}
+    if warning:
+        response["warning"] = warning
+    return response
 
 
 def _finalize(delegation_id: str, result: Dict[str, Any], status: str) -> None:
@@ -1096,8 +1153,17 @@ def dispatch_async_delegation_batch(
             }
         _records[delegation_id] = record
 
-    _persist_dispatch(record)
-    executor = _get_executor(max_async_children)
+    persistence_error = _persist_before_submit(record)
+    if persistence_error is not None:
+        return persistence_error
+    try:
+        executor = _get_executor(max_async_children)
+    except Exception as exc:
+        _discard_unstarted_dispatch(delegation_id)
+        return {
+            "status": "rejected",
+            "error": f"Failed to initialize async delegation batch executor: {exc}",
+        }
 
     def _worker() -> None:
         combined: Dict[str, Any] = {}
@@ -1128,21 +1194,33 @@ def dispatch_async_delegation_batch(
         # Propagate the dispatching profile to the detached batch children.
         executor.submit(propagate_context_to_thread(_worker))
     except Exception as exc:  # pragma: no cover
-        with _records_lock:
-            _records.pop(delegation_id, None)
-        _delete_durable_delegation(delegation_id)
+        _discard_unstarted_dispatch(delegation_id)
         return {
             "status": "rejected",
             "error": f"Failed to schedule async delegation batch: {exc}",
         }
+    warning = None
     if progress_fn is not None:
-        _ensure_stale_monitor()
+        try:
+            _ensure_stale_monitor()
+        except Exception as exc:
+            # Submission already succeeded: report degraded monitoring without
+            # converting accepted detached work into an apparent rejection.
+            warning = f"Delegation is running, but stale monitoring failed to start: {exc}"
+            logger.error(
+                "Async delegation batch %s accepted without stale monitoring: %s",
+                delegation_id,
+                exc,
+            )
 
     logger.info(
         "Dispatched async delegation batch %s (%d task(s), session_key=%s)",
         delegation_id, n, session_key or "<cli>",
     )
-    return {"status": "dispatched", "delegation_id": delegation_id}
+    response = {"status": "dispatched", "delegation_id": delegation_id}
+    if warning:
+        response["warning"] = warning
+    return response
 
 
 def _finalize_batch(
@@ -1497,6 +1575,23 @@ def list_async_delegations() -> List[Dict[str, Any]]:
             item["children_activity"] = activity
         item["in_tool"] = bool(in_tool)
     return items
+
+
+def interrupt_delegation(delegation_id: str) -> bool:
+    """Interrupt one live async delegation by its public handle."""
+    with _records_lock:
+        record = _records.get(delegation_id)
+        if record is None or record.get("status") not in ("running", "stalling"):
+            return False
+        interrupt_fn = record.get("interrupt_fn")
+    if not callable(interrupt_fn):
+        return False
+    try:
+        interrupt_fn()
+    except Exception as exc:
+        logger.debug("interrupt_delegation: %s failed: %s", delegation_id, exc)
+        return False
+    return True
 
 
 def interrupt_all(reason: str = "shutdown") -> int:
