@@ -372,6 +372,18 @@ def cron_incidents(args) -> int:
     return 0
 
 
+def _gateway_process_age_seconds(pid: int) -> Optional[float]:
+    """Return the gateway process age, or None when it cannot be inspected."""
+    try:
+        import time
+
+        import psutil
+
+        return max(0.0, time.time() - psutil.Process(int(pid)).create_time())
+    except Exception:
+        return None
+
+
 def cron_status():
     """Show cron execution status."""
     from cron.jobs import list_jobs
@@ -441,8 +453,27 @@ def cron_status():
         STALE_AFTER = TICKER_INTERVAL_SECONDS * 3 + 20  # = 200s at the 60s default
         hb_age = get_ticker_heartbeat_age()
         ok_age = get_ticker_success_age()
+        gateway_in_startup_grace = any(
+            age is not None and age <= STALE_AFTER
+            for age in (_gateway_process_age_seconds(pid) for pid in pids)
+        )
 
-        if hb_age is not None and hb_age > STALE_AFTER:
+        if hb_age is None and gateway_in_startup_grace:
+            print(color(
+                "✓ Gateway is running and waiting for the first cron ticker heartbeat",
+                Colors.GREEN,
+            ))
+            if pids:
+                print(f"  PID: {', '.join(map(str, pids))}")
+        elif hb_age is None:
+            print(color(
+                "⚠ Gateway is running but this profile has no cron ticker heartbeat.",
+                Colors.YELLOW,
+            ))
+            if pids:
+                print(f"  PID: {', '.join(map(str, pids))}")
+            print("  Cron jobs may NOT be firing. Restart: hermes gateway restart")
+        elif hb_age > STALE_AFTER:
             # No heartbeat at all → the ticker thread is gone.
             print(color(
                 "⚠ Gateway is running but the cron ticker looks STALLED — "
@@ -452,7 +483,7 @@ def cron_status():
             if pids:
                 print(f"  PID: {', '.join(map(str, pids))}")
             print("  Cron jobs may NOT be firing. Restart: hermes gateway restart")
-        elif hb_age is not None and ok_age is not None and ok_age > STALE_AFTER:
+        elif ok_age is not None and ok_age > STALE_AFTER:
             # Loop is alive (fresh heartbeat) but no tick has SUCCEEDED in a
             # long time → ticks are failing every iteration.
             print(color(

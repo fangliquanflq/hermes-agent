@@ -289,25 +289,40 @@ class TestCronStatusLockFirst:
     gateway (and its ticker) alive.
     """
 
-    def _run_status(self, *, pids, lock_active, lock_pid=None):
+    def _run_status(self, *, pids, lock_active, lock_pid=None, process_age=None):
         from unittest.mock import patch
         import io
-        from contextlib import redirect_stdout
+        from contextlib import ExitStack, redirect_stdout
 
         import hermes_cli.cron as cron_cli
 
         out = io.StringIO()
-        with (
-            patch("hermes_cli.cron._active_cron_provider_name", return_value="builtin"),
-            patch("hermes_cli.gateway.find_gateway_pids", return_value=list(pids)),
-            patch(
-                "gateway.status.is_gateway_runtime_lock_active",
-                return_value=lock_active,
-            ),
-            patch("gateway.status.get_running_pid", return_value=lock_pid),
-            redirect_stdout(out),
-        ):
-            cron_cli.cron_status()
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch("hermes_cli.cron._active_cron_provider_name", return_value="builtin")
+            )
+            stack.enter_context(
+                patch("hermes_cli.gateway.find_gateway_pids", return_value=list(pids))
+            )
+            stack.enter_context(
+                patch(
+                    "gateway.status.is_gateway_runtime_lock_active",
+                    return_value=lock_active,
+                )
+            )
+            stack.enter_context(
+                patch("gateway.status.get_running_pid", return_value=lock_pid)
+            )
+            if process_age is not None:
+                stack.enter_context(
+                    patch(
+                        "hermes_cli.cron._gateway_process_age_seconds",
+                        return_value=process_age,
+                        create=True,
+                    )
+                )
+            with redirect_stdout(out):
+                cron_cli.cron_status()
         return out.getvalue()
 
     def test_lock_active_suppresses_not_running_false_alarm(self, hermes_env):
@@ -318,3 +333,18 @@ class TestCronStatusLockFirst:
     def test_no_lock_no_pids_still_warns(self, hermes_env):
         text = self._run_status(pids=[], lock_active=False)
         assert "NOT fire" in text
+
+    def test_missing_heartbeat_without_fresh_process_warns(self, hermes_env):
+        text = self._run_status(pids=[4242], lock_active=False)
+
+        assert "no cron ticker heartbeat" in text
+        assert "may NOT be firing" in text
+        assert "will fire automatically" not in text
+
+    def test_missing_heartbeat_allows_fresh_gateway_startup(self, hermes_env):
+        text = self._run_status(
+            pids=[4242], lock_active=False, process_age=10.0
+        )
+
+        assert "waiting for the first cron ticker heartbeat" in text
+        assert "may NOT be firing" not in text

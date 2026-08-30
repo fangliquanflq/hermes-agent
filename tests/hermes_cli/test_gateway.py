@@ -53,6 +53,60 @@ def _install_fake_gateway_run(monkeypatch, start_gateway):
     )
 
 
+@pytest.mark.parametrize(
+    ("all_profiles", "expected_pids", "unit_pattern", "expected_units"),
+    [
+        (
+            False,
+            {6101},
+            "hermes-gateway-sekretaer.service",
+            ["hermes-gateway-sekretaer.service"] * 2,
+        ),
+        (
+            True,
+            {6101, 6202},
+            "hermes-gateway*",
+            [
+                "hermes-gateway-sekretaer.service",
+                "hermes-gateway-homelab.service",
+            ]
+            * 2,
+        ),
+    ],
+)
+def test_service_pids_respect_systemd_profile_scope(
+    monkeypatch, all_profiles, expected_pids, unit_pattern, expected_units
+):
+    """Default discovery is profile-local; fleet discovery remains available."""
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if "list-units" in args:
+            return SimpleNamespace(
+                stdout=(
+                    "hermes-gateway-sekretaer.service loaded active running Hermes\n"
+                    "hermes-gateway-homelab.service loaded active running Hermes\n"
+                )
+            )
+        pid = {
+            "hermes-gateway-sekretaer.service": "6101\n",
+            "hermes-gateway-homelab.service": "6202\n",
+        }[args[args.index("show") + 1]]
+        return SimpleNamespace(stdout=pid)
+
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: True)
+    monkeypatch.setattr(gateway, "is_macos", lambda: False)
+    monkeypatch.setattr(gateway, "get_service_name", lambda: "hermes-gateway-sekretaer")
+    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+
+    assert gateway._get_service_pids(all_profiles=all_profiles) == expected_pids
+    list_calls = [args for args in calls if "list-units" in args]
+    assert all(unit_pattern in args for args in list_calls)
+    shown_units = [args[args.index("show") + 1] for args in calls if "show" in args]
+    assert shown_units == expected_units
+
+
 def _run_native_windows_gateway_start_diag(
     tmp_path, breakaway_marker: str | None
 ):

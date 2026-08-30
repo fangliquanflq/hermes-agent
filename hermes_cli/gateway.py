@@ -121,28 +121,24 @@ def _get_service_pids(all_profiles: bool = False) -> set:
     the service manager having committed the new PID before the restart command
     returns (true for both systemd and launchd in practice).
 
-    ``all_profiles`` widens the launchd branch to every installed
-    ``ai.hermes.gateway*`` LaunchAgent — the update path needs the whole
-    fleet excluded from its sweep (#41403, #73626): sibling-profile launchd
-    gateways found by the (BSD-fixed) ps scan must not be misclassified as
-    manual processes and killed.  Default-scope callers (``gateway status``,
-    cron checks) keep seeing only the current profile's service; the orphan
-    reaper passes all_profiles=True for the same friendly-fire reason.  The
-    systemd branch has always been fleet-wide (``hermes-gateway*``) and is
-    unaffected.
+    ``all_profiles`` widens both service managers to every installed gateway.
+    The update and orphan-reaper paths need the whole fleet excluded from
+    their sweeps (#41403, #73626), while default-scope callers (``gateway
+    status``, cron checks) must see only the current profile's service.
     """
     pids: set = set()
 
     # --- systemd (Linux): user and system scopes ---
-    # systemd always lists every hermes-gateway* unit regardless of scope.
     if supports_systemd_services():
+        current_unit = f"{get_service_name()}.service"
+        unit_pattern = "hermes-gateway*" if all_profiles else current_unit
         for scope_args in [["systemctl", "--user"], ["systemctl"]]:
             try:
                 result = subprocess.run(
                     scope_args
                     + [
                         "list-units",
-                        "hermes-gateway*",
+                        unit_pattern,
                         "--plain",
                         "--no-legend",
                         "--no-pager",
@@ -156,6 +152,8 @@ def _get_service_pids(all_profiles: bool = False) -> set:
                     if not parts or not parts[0].endswith(".service"):
                         continue
                     svc = parts[0]
+                    if not all_profiles and svc != current_unit:
+                        continue
                     try:
                         show = subprocess.run(
                             scope_args + ["show", svc, "--property=MainPID", "--value"],
