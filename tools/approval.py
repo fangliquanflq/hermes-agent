@@ -265,13 +265,12 @@ def _is_cron_approval_context() -> bool:
         return env_var_enabled("HERMES_CRON_SESSION")
 
 
-#: Gateway platforms that are programmatic/unattended: no human is on the
-#: other end to answer an approval prompt, and the adapter has no
-#: ``send_exec_approval`` / ``/approve`` surface. Approval decisions for
-#: these sessions are governed by ``approvals.unattended_mode`` config
-#: (default deny), mirroring ``approvals.cron_mode`` — never by an
-#: interactive round-trip that would block for the full approval timeout
-#: with nobody to answer (#37284, #87509).
+#: Gateway platforms that are programmatic/unattended by default: no human is
+#: on the other end to answer an approval prompt unless the exact session has
+#: registered a transport. Listener-less decisions use
+#: ``approvals.unattended_mode`` (default deny), mirroring
+#: ``approvals.cron_mode`` — never an interactive round-trip that would block
+#: for the full approval timeout with nobody to answer (#37284, #87509).
 _UNATTENDED_APPROVAL_PLATFORMS = frozenset({
     "webhook",
     "msgraph_webhook",
@@ -282,7 +281,7 @@ _UNATTENDED_APPROVAL_PLATFORMS = frozenset({
 def _is_unattended_platform_approval_context() -> bool:
     """True when the session platform is a programmatic/unattended surface.
 
-    Webhook, msgraph_webhook, and api_server sessions bind
+    Webhook, msgraph_webhook, and listener-less api_server sessions bind
     ``HERMES_SESSION_PLATFORM`` like chat gateways do, but there is no human
     who can resolve a pending approval. Treating them as gateway approval
     contexts blocks the session for the full approval timeout (60-300s) and
@@ -330,16 +329,20 @@ def _is_gateway_approval_context() -> bool:
     fall through to the gateway branch would submit a pending approval
     with no listener and block the job indefinitely.
 
-    Unattended programmatic platforms (webhook, msgraph_webhook, api_server)
-    are excluded for the same reason: those adapters have no
-    ``send_exec_approval`` and no way to receive ``/approve`` replies.
-    Submitting a pending approval there blocks the session for the full
-    approval timeout (60-300 s) with no human who can resolve it (#37284,
-    #87509). Their dangerous-command handling is governed by
-    ``approvals.unattended_mode`` config (default deny), mirroring cron.
+    Programmatic platforms (webhook, msgraph_webhook, api_server) are excluded
+    when the exact session has no registered approval transport. Submitting a
+    pending approval in that state blocks for the full timeout (60-300 s) with
+    no human who can resolve it (#37284, #87509). A registered run-scoped
+    transport, such as /v1/runs, makes only that session interactive. Other
+    sessions remain governed by ``approvals.unattended_mode`` (default deny).
     """
     if _is_cron_approval_context():
         return False
+    session_key = get_current_session_key(default="")
+    if session_key:
+        with _lock:
+            if session_key in _gateway_notify_cbs:
+                return True
     if _is_unattended_platform_approval_context():
         return False
     if env_var_enabled("HERMES_GATEWAY_SESSION"):
@@ -5513,10 +5516,10 @@ def check_execute_code_guard(code: str, env_type: str,
             }
         return {"approved": True, "message": None}
 
-    # Unattended programmatic platforms (webhook/msgraph_webhook/api_server):
-    # no user is present to approve arbitrary code either. Mirrors the cron
-    # branch above; governed by approvals.unattended_mode (#37284, #87509).
-    if _is_unattended_platform_approval_context():
+    # Listener-less programmatic platforms have no user present to approve
+    # arbitrary code. A run-scoped transport (for example /v1/runs) makes the
+    # exact session a gateway context and must use the approval round-trip.
+    if _is_unattended_platform_approval_context() and not is_gateway:
         if _get_unattended_approval_mode() == "deny":
             return {
                 "approved": False,

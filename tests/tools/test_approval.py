@@ -705,17 +705,16 @@ class TestGatewayProtection:
 
 
 class TestWebhookApprovalExclusion:
-    """Unattended platform sessions must NOT be treated as gateway approval contexts.
+    """Listener-less platform sessions are not gateway approval contexts.
 
-    The webhook / msgraph_webhook / api_server adapters have no
-    ``send_exec_approval`` method and no way to receive ``/approve`` replies.
-    If such a session triggers a dangerous command and falls through to the
-    gateway approval branch, the session blocks for the full timeout
-    (60-300 s) with no human who can resolve it (#37284, #87509).
+    The webhook / msgraph_webhook adapters and most api_server routes have no
+    way to receive approval replies. If such a session falls through to the
+    gateway branch, it blocks for the full timeout with nobody to resolve it.
+    The /v1/runs route is the exception: it registers an exact run-scoped
+    callback that emits approval events and accepts approval responses.
 
-    Fix: ``_is_gateway_approval_context()`` returns ``False`` for platforms
-    in ``_UNATTENDED_APPROVAL_PLATFORMS``; the decision is governed by
-    ``approvals.unattended_mode`` (default deny) instead.
+    Listener-less sessions use ``approvals.unattended_mode`` (default deny);
+    a registered callback makes only that exact session interactive.
     """
 
     def test_webhook_platform_returns_false(self, monkeypatch):
@@ -740,6 +739,93 @@ class TestWebhookApprovalExclusion:
         for platform in _UNATTENDED_APPROVAL_PLATFORMS:
             monkeypatch.setenv("HERMES_SESSION_PLATFORM", platform)
             assert _is_gateway_approval_context() is False, platform
+
+    def test_api_server_registered_transport_is_gateway_context(self, monkeypatch):
+        """A /v1/runs callback makes only its exact API session interactive."""
+        from tools.approval import (
+            _is_gateway_approval_context,
+            register_gateway_notify,
+            reset_current_session_key,
+            set_current_session_key,
+            unregister_gateway_notify,
+        )
+
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        session_key = "api-run-with-approval-transport"
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "api_server")
+        approval_token = set_current_session_key(session_key)
+        register_gateway_notify(session_key, lambda _data: None)
+        try:
+            assert _is_gateway_approval_context() is True
+        finally:
+            unregister_gateway_notify(session_key)
+            reset_current_session_key(approval_token)
+
+    def test_api_server_registered_transport_resolves_execute_code(self, monkeypatch):
+        """The /v1/runs transport emits and resolves an exact once decision."""
+        import tools.approval as approval_mod
+        from tools.approval import (
+            check_execute_code_guard,
+            register_gateway_notify,
+            reset_current_session_key,
+            resolve_gateway_approval,
+            set_current_session_key,
+            unregister_gateway_notify,
+        )
+
+        self._isolate(monkeypatch)
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "api_server")
+        monkeypatch.setattr(approval_mod, "_get_approval_mode", lambda: "manual")
+        monkeypatch.setattr(approval_mod, "_get_unattended_approval_mode", lambda: "deny")
+        session_key = "api-run-execute-code-approval"
+        events = []
+
+        def approve_once(data):
+            events.append(dict(data))
+            assert resolve_gateway_approval(
+                session_key,
+                "once",
+                request_id=data["request_id"],
+            ) == 1
+
+        approval_token = set_current_session_key(session_key)
+        register_gateway_notify(session_key, approve_once)
+        try:
+            result = check_execute_code_guard("pass", "local")
+        finally:
+            unregister_gateway_notify(session_key)
+            reset_current_session_key(approval_token)
+
+        assert result["approved"] is True
+        assert result["user_approved"] is True
+        assert len(events) == 1
+        assert events[0]["command"].startswith("execute_code <<'PY'")
+        assert events[0]["request_id"]
+
+    def test_cron_stays_unattended_with_registered_transport(self, monkeypatch):
+        """Cron policy wins even if a stale callback exists for its session key."""
+        from tools.approval import (
+            _is_gateway_approval_context,
+            register_gateway_notify,
+            reset_current_session_key,
+            set_current_session_key,
+            unregister_gateway_notify,
+        )
+
+        session_key = "cron-with-stale-approval-transport"
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "api_server")
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+        approval_token = set_current_session_key(session_key)
+        register_gateway_notify(session_key, lambda _data: None)
+        try:
+            assert _is_gateway_approval_context() is False
+        finally:
+            unregister_gateway_notify(session_key)
+            reset_current_session_key(approval_token)
 
     def test_non_webhook_gateway_session_returns_true(self, monkeypatch):
         """Non-webhook gateway sessions (e.g. Telegram) are still gateway contexts."""
