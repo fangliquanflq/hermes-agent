@@ -169,10 +169,97 @@ def test_session_interrupt_uses_explicit_stop_compatibility(server, monkeypatch,
 # ── write_json ────────────────────────────────────────────────
 
 
+class _RoutingTransport:
+    def __init__(self, *, succeeds, closed=False):
+        self._closed = closed
+        self.succeeds = succeeds
+        self.frames = []
+
+    def write(self, frame):
+        self.frames.append(frame)
+        return self.succeeds
+
+    def close(self):
+        self._closed = True
+
+
 def test_write_json(capture):
     server, buf = capture
     assert server.write_json({"test": True})
     assert json.loads(buf.getvalue()) == {"test": True}
+
+
+@pytest.mark.parametrize("owner_state", ["write-failed", "closed", "detached"])
+def test_session_event_retries_on_latest_live_viewer_after_owner_write_fails(
+    server, owner_state
+):
+    failed_owner = {
+        "write-failed": _RoutingTransport(succeeds=False),
+        "closed": _RoutingTransport(succeeds=False, closed=True),
+        "detached": server._detached_ws_transport,
+    }[owner_state]
+    active_viewer = _RoutingTransport(succeeds=True)
+    server._sessions["runtime-session"] = {
+        "transport": failed_owner,
+        "viewers": {failed_owner: 1.0, active_viewer: 2.0},
+    }
+    frame = server._event_frame(
+        "clarify.request",
+        "runtime-session",
+        {"request_id": "clarify-1", "question": "Which target?"},
+    )
+
+    assert server.write_json(frame) is True
+
+    if owner_state == "write-failed":
+        assert failed_owner.frames == [frame]
+    assert active_viewer.frames == [frame]
+    assert server._sessions["runtime-session"]["transport"] is active_viewer
+
+
+def test_session_event_uses_healthy_owner_without_duplicate_viewer_delivery(server):
+    owner = MagicMock(_closed=False)
+    owner.write.return_value = True
+    viewer = MagicMock(_closed=False)
+    server._sessions["runtime-session"] = {
+        "transport": owner,
+        "viewers": {owner: 1.0, viewer: 2.0},
+    }
+    frame = server._event_frame(
+        "clarify.request",
+        "runtime-session",
+        {"request_id": "clarify-1", "question": "Which target?"},
+    )
+
+    assert server.write_json(frame) is True
+
+    owner.write.assert_called_once_with(frame)
+    viewer.write.assert_not_called()
+    assert server._sessions["runtime-session"]["transport"] is owner
+
+
+def test_session_event_never_falls_back_to_another_sessions_live_viewer(
+    server, caplog
+):
+    failed_owner = _RoutingTransport(succeeds=False)
+    other_viewer = _RoutingTransport(succeeds=True)
+    server._sessions["runtime-session"] = {"transport": failed_owner}
+    server._sessions["other-session"] = {
+        "transport": other_viewer,
+        "viewers": {other_viewer: 1.0},
+    }
+    frame = server._event_frame(
+        "clarify.request",
+        "runtime-session",
+        {"request_id": "clarify-1", "question": "Which target?"},
+    )
+
+    assert server.write_json(frame) is False
+
+    assert failed_owner.frames == [frame]
+    assert other_viewer.frames == []
+    assert "session event delivery failed type=clarify.request sid=runtime-session" in caplog.text
+    assert "Which target?" not in caplog.text
 
 
 def test_live_session_payload_replays_pending_approval(server, monkeypatch):

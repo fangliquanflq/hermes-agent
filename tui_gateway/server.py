@@ -2496,11 +2496,53 @@ def write_json(obj: dict) -> bool:
     if obj.get("method") == "event":
         params = obj.get("params")
         sid = ((params or {}).get("session_id")) if isinstance(params, dict) else ""
-        if sid and (t := (_sessions.get(sid) or {}).get("transport")) is not None:
+        session = _sessions.get(sid) if sid else None
+        if session is not None and (t := session.get("transport")) is not None:
             from tui_gateway.event_replay import _stamp_event
 
             _stamp_event(obj)
-            return t.write(obj)
+            if not _transport_is_dead(t) and t.write(obj):
+                return True
+
+            # A disconnected owner can remain stored briefly while another
+            # Desktop window still views the same session. Retry only against
+            # transports explicitly attached to THIS session — broadcasting to
+            # `_live_transports` could expose a clarify/approval prompt to a
+            # different profile or session.
+            with _sessions_lock:
+                if _sessions.get(sid) is session:
+                    viewers = sorted(
+                        (
+                            (seen_at, viewer)
+                            for viewer, seen_at in (session.get("viewers") or {}).items()
+                            if viewer is not t and not _transport_is_dead(viewer)
+                        ),
+                        reverse=True,
+                        key=lambda item: item[0],
+                    )
+                else:
+                    viewers = []
+            for _seen_at, viewer in viewers:
+                if not viewer.write(obj):
+                    continue
+                with _sessions_lock:
+                    if _sessions.get(sid) is session and (
+                        session.get("transport") is t
+                        or _transport_is_dead(session.get("transport"))
+                    ):
+                        session["transport"] = viewer
+                return True
+
+            event = (params or {}).get("type") if isinstance(params, dict) else ""
+            log = logger.warning if str(event).endswith(".request") else logger.debug
+            log(
+                "session event delivery failed type=%s sid=%s transport=%s viewers=%d",
+                event,
+                sid,
+                type(t).__name__,
+                len(viewers),
+            )
+            return False
 
     from tui_gateway.event_replay import _stamp_event
 
