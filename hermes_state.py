@@ -3768,6 +3768,8 @@ def collect_state_db_stats(db_path: Path) -> Dict[str, Any]:
     - ``fts_rebuild_pending`` — True when the deferred v23 backfill has not
       finished (high_water present and progress < high_water)
     - ``fts_rebuild_high_water`` / ``fts_rebuild_progress`` — raw ints
+    - ``fts_cjk_rebuild_pending`` / ``fts_cjk_rebuild_stale`` — CJK index
+      recovery state, plus its high-water and progress counters
     - ``fts_rebuild_deferral`` — durable blocked-repair diagnostic, when present
     """
     stats: Dict[str, Any] = {
@@ -3784,6 +3786,10 @@ def collect_state_db_stats(db_path: Path) -> Dict[str, Any]:
         "fts_rebuild_pending": None,
         "fts_rebuild_high_water": None,
         "fts_rebuild_progress": None,
+        "fts_cjk_rebuild_pending": None,
+        "fts_cjk_rebuild_high_water": None,
+        "fts_cjk_rebuild_progress": None,
+        "fts_cjk_rebuild_stale": None,
         "fts_rebuild_deferral": None,
     }
 
@@ -3875,6 +3881,16 @@ def collect_state_db_stats(db_path: Path) -> Dict[str, Any]:
             stats["fts_rebuild_pending"] = False
         else:
             stats["fts_rebuild_pending"] = (progress or 0) < high_water
+        cjk_high_water = _meta_int("fts_cjk_rebuild_high_water")
+        cjk_progress = _meta_int("fts_cjk_rebuild_progress")
+        cjk_stale = _meta_int(FTS_CJK_STALE_KEY)
+        stats["fts_cjk_rebuild_high_water"] = cjk_high_water
+        stats["fts_cjk_rebuild_progress"] = cjk_progress
+        stats["fts_cjk_rebuild_stale"] = bool(cjk_stale)
+        if cjk_high_water is None:
+            stats["fts_cjk_rebuild_pending"] = False
+        else:
+            stats["fts_cjk_rebuild_pending"] = (cjk_progress or 0) < cjk_high_water
         try:
             row = conn.execute(
                 "SELECT value FROM state_meta WHERE key = ? LIMIT 1",
@@ -4251,6 +4267,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # _init_schema / _probe_fts_cjk.
         self._fts_cjk_loaded = False
         self._fts_cjk_available = False
+        self._fts_cjk_backfill_stop = threading.Event()
+        self._fts_cjk_backfill_thread: Optional[threading.Thread] = None
         self._fts_unavailable_warned = False
         self._conn = None
         # Async token accounting (see queue_token_counts). The condition
@@ -4440,13 +4458,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     raise
                 _connect_and_init_with_lock_patience()
 
-            # NOTE: the v23 FTS optimization is OPT-IN (`hermes db optimize`),
-            # never auto-started on open. Legacy installs keep their working
-            # v22 inline FTS untouched here; only the explicit foreground
-            # command demotes + rebuilds. This avoids a background worker
-            # racing session lifecycle and the surprise disk/latency cost on
-            # an unattended open. (An interrupted optimize resumes when the
-            # user re-runs the command.)
+            # The disk-heavy v23 layout migration remains strictly opt-in.
+            # CJK backfill is additive, chunked, and already has durable
+            # markers, so a pending/interrupted CJK-only pass resumes in a
+            # throttled worker instead of leaving CJK search degraded forever.
+            self._start_fts_cjk_backfill_worker()
             initialization_complete = True
         except Exception as exc:
             # Capture the cause so /resume and friends can surface WHY the
@@ -5450,6 +5466,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         races the gateway's live writer and tears B-tree pages — issue
         #45383). Read-only connections never request a checkpoint.
         """
+        self._stop_fts_cjk_backfill_worker()
         self._stop_token_writer()
         hook, self._token_atexit_hook = self._token_atexit_hook, None
         if hook is not None:
@@ -5485,6 +5502,33 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                         )
                 conn, self._conn = self._conn, None
                 self._close_connection_quietly(conn)
+
+    def _start_fts_cjk_backfill_worker(self) -> None:
+        """Start one throttled CJK resume worker when durable work exists."""
+        if self.read_only or not self._fts_enabled or not self._fts_cjk_loaded:
+            return
+        if (
+            self.fts_cjk_rebuild_status() is None
+            and self.get_meta(FTS_CJK_STALE_KEY) is None
+        ):
+            return
+        if self._fts_cjk_backfill_thread is not None:
+            return
+        self._fts_cjk_backfill_stop.clear()
+        thread = threading.Thread(
+            target=self._run_fts_cjk_backfill_worker,
+            daemon=True,
+            name="fts-cjk-backfill",
+        )
+        self._fts_cjk_backfill_thread = thread
+        thread.start()
+
+    def _stop_fts_cjk_backfill_worker(self) -> None:
+        """Stop the resume worker before closing its SQLite connection."""
+        self._fts_cjk_backfill_stop.set()
+        thread, self._fts_cjk_backfill_thread = self._fts_cjk_backfill_thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
 
     def __del__(self) -> None:
         """Safety net: close the connection if the caller forgot.

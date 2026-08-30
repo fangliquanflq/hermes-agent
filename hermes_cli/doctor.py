@@ -461,6 +461,32 @@ def _render_state_db_stats(stats: dict, holders=None) -> list:
             "",
         ))
 
+    if stats.get("fts_cjk_rebuild_pending") or stats.get("fts_cjk_rebuild_stale"):
+        indexed = stats.get("fts_cjk_rebuild_progress") or 0
+        total = stats.get("fts_cjk_rebuild_high_water") or 0
+        percent = min(100, int(100 * indexed / total)) if total > 0 else 0
+        if stats.get("fts_cjk_rebuild_stale"):
+            text = (
+                f"CJK search index backfill {percent}% ({indexed:,}/{total:,})"
+                if total > 0
+                else "CJK search index is stale"
+            )
+            detail = (
+                "(sync-trigger gap is unknown; the next tokenizer-capable "
+                "writable open restarts safely from scratch)"
+            )
+        else:
+            text = f"CJK search index backfill {percent}% ({indexed:,}/{total:,})"
+            detail = (
+                "(resumes automatically on a tokenizer-capable writable open; "
+                "run 'hermes sessions optimize-storage' to finish in foreground)"
+            )
+        lines.append((
+            "warn",
+            text,
+            detail,
+        ))
+
     deferral = stats.get("fts_rebuild_deferral")
     if isinstance(deferral, dict):
         attempts = deferral.get("attempts")

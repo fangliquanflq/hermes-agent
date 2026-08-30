@@ -433,6 +433,62 @@ class SessionSearchMixin:
         self._fts_cjk_available = True
         logger.info("CJK FTS index backfill complete — serving CJK search.")
 
+    def _run_fts_cjk_backfill_worker(self) -> None:
+        """Resume a pending CJK backfill without blocking database open.
+
+        Ordinary interruption keeps the durable progress marker and resumes
+        from that exact id. A stale breadcrumb is different: it means sync
+        triggers were absent for an unknown interval, so no existing prefix
+        can be proven complete. In that case the established safe reset path
+        runs first and the warning makes the discarded progress explicit.
+        """
+        try:
+            status = self.fts_cjk_rebuild_status()
+            stale = self.get_meta(FTS_CJK_STALE_KEY) is not None
+            if stale:
+                if status is not None:
+                    logger.warning(
+                        "CJK FTS backfill for %s was %d%% complete (%d/%d), "
+                        "but its sync triggers were absent for an unknown "
+                        "interval; restarting safely from scratch.",
+                        self.db_path,
+                        status["percent"],
+                        status["indexed"],
+                        status["total"],
+                    )
+                self._fts_cjk_reset_if_stale()
+                status = self.fts_cjk_rebuild_status()
+
+            if status is None:
+                return
+            logger.warning(
+                "Resuming CJK FTS backfill for %s at %d%% (%d/%d) in the "
+                "background; `hermes doctor` reports progress.",
+                self.db_path,
+                status["percent"],
+                status["indexed"],
+                status["total"],
+            )
+            while not self._fts_cjk_backfill_stop.is_set():
+                started = time.monotonic()
+                if not self.fts_cjk_rebuild_step():
+                    break
+                pause = max(
+                    self._FTS_REBUILD_MIN_PAUSE,
+                    (time.monotonic() - started) * self._FTS_REBUILD_DUTY_FACTOR,
+                )
+                if self._fts_cjk_backfill_stop.wait(pause):
+                    break
+        except Exception:
+            # Search continues through trigram/LIKE. A later writable open or
+            # foreground optimize-storage run retries from durable progress.
+            logger.warning(
+                "Background CJK FTS backfill paused for %s; progress remains "
+                "durable and will resume on the next writable open.",
+                self.db_path,
+                exc_info=True,
+            )
+
     def _fts_cjk_reset_if_stale(self) -> None:
         """Rebuild path for a stale cjk index (triggers were dropped).
 

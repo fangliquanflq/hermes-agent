@@ -132,6 +132,48 @@ def test_collect_stats_rebuild_pending_flag(populated_db):
     assert stats["fts_rebuild_progress"] == 40
 
 
+def test_collect_and_render_cjk_rebuild_progress(populated_db):
+    conn = sqlite3.connect(str(populated_db))
+    conn.executemany(
+        "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)",
+        [
+            ("fts_cjk_rebuild_high_water", "200"),
+            ("fts_cjk_rebuild_progress", "50"),
+            ("fts_cjk_stale", "1"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    stats = collect_state_db_stats(populated_db)
+    assert stats["fts_cjk_rebuild_pending"] is True
+    assert stats["fts_cjk_rebuild_high_water"] == 200
+    assert stats["fts_cjk_rebuild_progress"] == 50
+    assert stats["fts_cjk_rebuild_stale"] is True
+
+    from hermes_cli.doctor import _render_state_db_stats
+
+    warnings = [line for line in _render_state_db_stats(stats) if line[0] == "warn"]
+    text = " ".join(" ".join(str(part) for part in line) for line in warnings)
+    assert "CJK search index backfill 25%" in text
+    assert "restarts safely from scratch" in text
+
+
+def test_render_exposes_stale_cjk_index_without_backfill_markers():
+    from hermes_cli.doctor import _render_state_db_stats
+
+    lines = _render_state_db_stats(
+        _base_stats(fts_cjk_rebuild_stale=True), holders=None
+    )
+    warnings = " ".join(
+        " ".join(str(part) for part in line)
+        for line in lines
+        if line[0] == "warn"
+    )
+    assert "CJK search index is stale" in warnings
+    assert "restarts safely from scratch" in warnings
+
+
 # ── count_db_holders ────────────────────────────────────────────────────
 
 
@@ -175,6 +217,10 @@ def _base_stats(**overrides):
         "fts_rebuild_pending": False,
         "fts_rebuild_high_water": None,
         "fts_rebuild_progress": None,
+        "fts_cjk_rebuild_pending": False,
+        "fts_cjk_rebuild_high_water": None,
+        "fts_cjk_rebuild_progress": None,
+        "fts_cjk_rebuild_stale": False,
     }
     stats.update(overrides)
     return stats

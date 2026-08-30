@@ -7,6 +7,7 @@ skips when no C toolchain / extension loading is available.
 import shutil
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -108,9 +109,9 @@ def test_config_toggle_disables_cjk(cjk_so, tmp_path, monkeypatch):
 
 
 
-def test_existing_v23_db_gains_cjk_via_optimize(cjk_so, tmp_path, monkeypatch):
+def test_existing_v23_db_auto_backfills_cjk(cjk_so, tmp_path, monkeypatch):
     """A v23 DB created BEFORE the extension existed: next capable open
-    creates the index with backfill markers; optimize-storage backfills."""
+    creates the index with backfill markers and resumes them automatically."""
     monkeypatch.setenv("HERMES_FTS5_CJK_SO", str(tmp_path / "absent.so"))
     db_path = tmp_path / "state.db"
     d1 = SessionDB(db_path=db_path)
@@ -122,18 +123,12 @@ def test_existing_v23_db_gains_cjk_via_optimize(cjk_so, tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_FTS5_CJK_SO", str(cjk_so))
     d2 = SessionDB(db_path=db_path)
     assert d2._fts_cjk_loaded
-    # Backfill pending — index not served yet, old rows not indexed.
-    assert not d2._fts_cjk_available
-    st = d2.fts_cjk_rebuild_status()
-    assert st is not None and st["pending"]
-    assert d2.fts_optimize_available()
-    # NEW rows are indexed live by the id-gated triggers even mid-backfill.
+    # NEW rows are indexed live by the id-gated triggers while the background
+    # worker resumes historical rows from the durable marker.
     d2.append_message("s1", role="user", content="새로운 메시지")
-    # Search answers via legacy routes meanwhile.
-    assert d2.search_messages("기존", limit=10)
-
-    result = d2.optimize_fts_storage(vacuum=False)
-    assert result["ok"]
+    deadline = time.monotonic() + 5
+    while d2.fts_cjk_rebuild_status() is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert d2._fts_cjk_available
     assert d2.fts_cjk_rebuild_status() is None
     assert d2._describe_search_path("기존") == "fts_cjk"
@@ -141,6 +136,77 @@ def test_existing_v23_db_gains_cjk_via_optimize(cjk_so, tmp_path, monkeypatch):
     assert len(rows) == 10
     assert d2.search_messages("새로운", limit=10)
     d2.close()
+
+
+def test_interrupted_cjk_backfill_resumes_existing_progress(
+    cjk_so, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_FTS5_CJK_SO", str(tmp_path / "absent.so"))
+    db_path = tmp_path / "state.db"
+    d1 = SessionDB(db_path=db_path)
+    d1.create_session(session_id="s1", source="cli", model="m")
+    for i in range(8):
+        d1.append_message("s1", role="user", content=f"중단 복구 {i}")
+    d1.close()
+
+    monkeypatch.setenv("HERMES_FTS5_CJK_SO", str(cjk_so))
+    monkeypatch.setattr(SessionDB, "_start_fts_cjk_backfill_worker", lambda self: None)
+    d2 = SessionDB(db_path=db_path)
+    d2._FTS_REBUILD_CHUNK_ROWS = 2
+    assert d2.fts_cjk_rebuild_step() is True
+    assert d2.get_meta("fts_cjk_rebuild_progress") == "2"
+    d2.close()
+
+    d3 = SessionDB(db_path=db_path)
+    seen = []
+    original_step = d3.fts_cjk_rebuild_step
+
+    def recording_step():
+        seen.append(d3.get_meta("fts_cjk_rebuild_progress"))
+        return original_step()
+
+    d3.fts_cjk_rebuild_step = recording_step
+    d3._run_fts_cjk_backfill_worker()
+    assert seen[0] == "2"
+    assert d3.fts_cjk_rebuild_status() is None
+    assert d3._fts_cjk_available
+    d3.close()
+
+
+def test_stale_cjk_backfill_restarts_when_trigger_gap_is_unknown(db):
+    with db._lock:
+        high_water = db._conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM messages"
+        ).fetchone()[0]
+        db._conn.executemany(
+            "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)",
+            [
+                ("fts_cjk_rebuild_high_water", str(high_water)),
+                ("fts_cjk_rebuild_progress", "2"),
+                (FTS_CJK_STALE_KEY, "1"),
+            ],
+        )
+        for trigger in (
+            "messages_fts_cjk_insert",
+            "messages_fts_cjk_delete",
+            "messages_fts_cjk_update",
+        ):
+            db._conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+
+    seen = []
+    original_step = db.fts_cjk_rebuild_step
+
+    def recording_step():
+        seen.append(db.get_meta("fts_cjk_rebuild_progress"))
+        return original_step()
+
+    db.fts_cjk_rebuild_step = recording_step
+    db._FTS_REBUILD_MIN_PAUSE = 0
+    db._run_fts_cjk_backfill_worker()
+    assert seen[0] == "0"
+    assert db.get_meta(FTS_CJK_STALE_KEY) is None
+    assert db.fts_cjk_rebuild_status() is None
+    assert db._fts_cjk_available
 
 
 def test_legacy_v22_optimize_lands_on_cjk(cjk_so, tmp_path, monkeypatch):
