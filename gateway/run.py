@@ -7518,6 +7518,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+        # Executor-backed session-hygiene compression is not represented in
+        # _running_agents once its owning turn unwinds. Keep it visible to the
+        # shutdown drain until the worker actually exits.
+        self._hygiene_compressions: dict[asyncio.Future, tuple[Any, Any]] = {}
 
         # Event-loop liveness heartbeat (#66892): rewritten every 30s while
         # the loop is dispatching. External supervisors use the file mtime /
@@ -8888,7 +8892,51 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._running_agent_count()
             + self._active_cron_job_count()
             + self._active_api_run_count()
+            + self._active_hygiene_compression_count()
         )
+
+    def _track_hygiene_compression(
+        self, future: asyncio.Future, commit_fence: Any, agent: Any
+    ) -> None:
+        """Keep one executor-backed hygiene compression drain-visible."""
+        tracked = getattr(self, "_hygiene_compressions", None)
+        if tracked is None:
+            tracked = {}
+            self._hygiene_compressions = tracked
+        tracked[future] = (commit_fence, agent)
+
+        def _discard(done: asyncio.Future) -> None:
+            current = getattr(self, "_hygiene_compressions", None)
+            if current is not None:
+                current.pop(done, None)
+
+        future.add_done_callback(_discard)
+
+    def _active_hygiene_compression_count(self) -> int:
+        return sum(
+            1
+            for future in getattr(self, "_hygiene_compressions", {})
+            if not future.done()
+        )
+
+    def _interrupt_hygiene_compressions(self, reason: str) -> int:
+        """Fence and hard-interrupt hygiene workers before shared teardown."""
+        interrupted = 0
+        for future, (commit_fence, agent) in list(
+            getattr(self, "_hygiene_compressions", {}).items()
+        ):
+            if future.done():
+                continue
+            interrupted += 1
+            try:
+                commit_fence.revoke_commit_admission()
+            except Exception as exc:
+                logger.debug("Failed fencing hygiene compression: %s", exc)
+            try:
+                request_hard_interrupt(agent, reason)
+            except Exception as exc:
+                logger.debug("Failed interrupting hygiene compression: %s", exc)
+        return interrupted
 
     def _active_cron_job_count(self) -> int:
         """Count of cron jobs currently executing, from the cron scheduler's
@@ -10960,25 +11008,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         last_active_count = self._running_agent_count()
         last_cron_count = self._active_cron_job_count()
         last_api_count = self._active_api_run_count()
+        last_hygiene_count = self._active_hygiene_compression_count()
         last_status_at = 0.0
 
         def _maybe_update_status(force: bool = False) -> None:
-            nonlocal last_active_count, last_cron_count, last_api_count, last_status_at
+            nonlocal last_active_count, last_cron_count, last_api_count
+            nonlocal last_hygiene_count, last_status_at
             now = asyncio.get_running_loop().time()
             active_count = self._running_agent_count()
             cron_count = self._active_cron_job_count()
             api_count = self._active_api_run_count()
+            hygiene_count = self._active_hygiene_compression_count()
             if (
                 force
                 or active_count != last_active_count
                 or cron_count != last_cron_count
                 or api_count != last_api_count
+                or hygiene_count != last_hygiene_count
                 or (now - last_status_at) >= 1.0
             ):
                 self._update_runtime_status("draining")
                 last_active_count = active_count
                 last_cron_count = cron_count
                 last_api_count = api_count
+                last_hygiene_count = hygiene_count
                 last_status_at = now
 
         # Cron jobs run on the scheduler's own thread pool, outside
@@ -10987,7 +11040,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # or a cron job's tool work gets killed with zero warning the
         # instant it's the only active thing running (#60432).
         # API-server / desk sessions have the same structural gap (#63529).
-        if not self._running_agents and last_cron_count == 0 and last_api_count == 0:
+        if (
+            not self._running_agents
+            and last_cron_count == 0
+            and last_api_count == 0
+            and last_hygiene_count == 0
+        ):
             _maybe_update_status(force=True)
             return snapshot, False
 
@@ -11008,7 +11066,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         def _still_draining() -> bool:
             now = loop.time()
             if (
-                len(self._running_agents) or self._active_api_run_count()
+                len(self._running_agents)
+                or self._active_api_run_count()
+                or self._active_hygiene_compression_count()
             ) and now < deadline:
                 return True
             return bool(self._active_cron_job_count()) and now < cron_deadline
@@ -11024,6 +11084,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             bool(len(self._running_agents))
             or bool(self._active_cron_job_count())
             or bool(self._active_api_run_count())
+            or bool(self._active_hygiene_compression_count())
         )
         _maybe_update_status(force=True)
         return snapshot, timed_out
@@ -11043,6 +11104,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         interrupted_api = self._interrupt_api_server_runs(reason)
         if interrupted_api:
             logger.debug("Interrupted %d api_server run(s) during shutdown", interrupted_api)
+        interrupted_hygiene = self._interrupt_hygiene_compressions(reason)
+        if interrupted_hygiene:
+            logger.debug(
+                "Interrupted %d hygiene compression(s) during shutdown",
+                interrupted_hygiene,
+            )
 
     async def _notify_interrupted_cron_jobs(self, job_ids) -> int:
         """Tell the owner of each just-interrupted cron job that its run died.
@@ -15597,6 +15664,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             _cron_at_start = self._active_cron_job_count()
             _api_at_start = self._active_api_run_count()
+            _hygiene_at_start = self._active_hygiene_compression_count()
             # In-flight cron work gets its own floor, clamped to the watchdog
             # leash we're already running under so the extra wait can never
             # cost us the post-drain cleanup window (#82161).
@@ -15631,7 +15699,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "Shutdown phase: drain done at +%.2fs (drain took %.2fs, "
                 "timed_out=%s, active_at_start=%d, active_now=%d, "
                 "cron_at_start=%d, cron_now=%d, "
-                "api_at_start=%d, api_now=%d)",
+                "api_at_start=%d, api_now=%d, "
+                "hygiene_at_start=%d, hygiene_now=%d)",
                 _phase_elapsed(),
                 _drain_elapsed,
                 timed_out,
@@ -15641,6 +15710,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 self._active_cron_job_count(),
                 _api_at_start,
                 self._active_api_run_count(),
+                _hygiene_at_start,
+                self._active_hygiene_compression_count(),
             )
 
             if not timed_out:
@@ -15661,11 +15732,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.warning(
                     "Gateway drain timed out after %.1fs with %d active agent(s), "
                     "%d in-flight cron job(s), and %d api_server run(s); "
+                    "%d hygiene compression(s); "
                     "interrupting remaining work.",
                     _drain_elapsed,
                     self._running_agent_count(),
                     self._active_cron_job_count(),
                     self._active_api_run_count(),
+                    self._active_hygiene_compression_count(),
                 )
                 # Mark forcibly-interrupted sessions as resume_pending BEFORE
                 # interrupting the agents.  This preserves each session's
@@ -15711,7 +15784,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # to stop gets its tool subprocesses killed below before it can
                 # unwind — the exact amputation this interrupt exists to avoid.
                 while (
-                    self._running_agents or self._active_api_run_count()
+                    self._running_agents
+                    or self._active_api_run_count()
+                    or self._active_hygiene_compression_count()
                 ) and asyncio.get_running_loop().time() < interrupt_deadline:
                     self._update_runtime_status("draining")
                     await asyncio.sleep(0.1)
@@ -15726,7 +15801,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # at settle-loop exit, re-signal so a late-materializing
                 # agent gets a cooperative interrupt instead of going
                 # straight to the tool-subprocess kill.
-                if self._running_agents or self._active_api_run_count():
+                if (
+                    self._running_agents
+                    or self._active_api_run_count()
+                    or self._active_hygiene_compression_count()
+                ):
                     self._interrupt_running_agents(
                         _INTERRUPT_REASON_GATEWAY_RESTART
                         if self._restart_requested
@@ -15892,7 +15971,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # unwrap to the sync handle. ``session_store`` holds it at ``_db``.
             _self_db = getattr(self, "_session_db", None)
             _self_db = getattr(_self_db, "_db", _self_db)
-            for _db in (_self_db, getattr(getattr(self, "session_store", None), "_db", None)):
+            _hygiene_still_running = bool(
+                self._active_hygiene_compression_count()
+            )
+            if _hygiene_still_running:
+                logger.warning(
+                    "Leaving SessionDB handles open because hygiene compression "
+                    "is still unwinding after shutdown interruption"
+                )
+            _dbs_to_close = () if _hygiene_still_running else (
+                _self_db,
+                getattr(getattr(self, "session_store", None), "_db", None),
+            )
+            for _db in _dbs_to_close:
                 if _db is None or not hasattr(_db, "close"):
                     continue
                 try:
@@ -15907,17 +15998,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _sweep = getattr(
                 getattr(self, "session_store", None), "close_all_db_handles", None
             )
-            if _sweep is not None:
+            if _sweep is not None and not _hygiene_still_running:
                 try:
                     _sweep()
                 except Exception as _e:
                     logger.debug("SessionDB handle sweep error: %s", _e)
             # Same sweep for the runner's own per-profile session_search
             # handles (slash commands resolve them under profile scopes).
-            try:
-                GatewayRunner.close_all_session_db_handles(self)
-            except Exception as _e:
-                logger.debug("Runner SessionDB handle sweep error: %s", _e)
+            if not _hygiene_still_running:
+                try:
+                    GatewayRunner.close_all_session_db_handles(self)
+                except Exception as _e:
+                    logger.debug("Runner SessionDB handle sweep error: %s", _e)
             GatewayRunner._shutdown_executor(self)
             logger.info(
                 "Shutdown phase: SessionDB close done at +%.2fs",
@@ -20589,6 +20681,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             approx_tokens=_approx_tokens,
                                             commit_fence=_hyg_commit_fence,
                                         ),
+                                    )
+                                    self._track_hygiene_compression(
+                                        _hyg_future,
+                                        _hyg_commit_fence,
+                                        _hyg_agent,
                                     )
                                     try:
                                         # Progress-aware wait: the timeout is an
