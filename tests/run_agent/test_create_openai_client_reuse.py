@@ -309,6 +309,60 @@ def test_force_close_tcp_sockets_finds_in_flight_pool_request_sockets():
     assert sock.timeouts == [0]
 
 
+def test_force_close_tcp_sockets_finds_active_response_stream_socket_once():
+    """An active httpx response can be the only owner exposing the socket.
+
+    The OpenAI SDK keeps the response chain as BoundSyncStream ->
+    ResponseStream -> PoolByteStream -> HTTP11ConnectionByteStream while a
+    streaming ``next()`` is blocked. Some compatible transports expose no
+    matching connection through the client's pool at that point (#98974).
+    The abort sweep must therefore accept both roots and deduplicate the raw
+    socket when a transport happens to expose it through both.
+    """
+    from agent.agent_runtime_helpers import force_close_tcp_sockets
+
+    class FakeSocket:
+        def __init__(self):
+            self.shutdown_calls = 0
+            self.close_calls = 0
+            self.timeouts = []
+
+        def settimeout(self, value):
+            self.timeouts.append(value)
+
+        def shutdown(self, _how):
+            self.shutdown_calls += 1
+
+        def close(self):
+            self.close_calls += 1
+
+    sock = FakeSocket()
+    network_stream = SimpleNamespace(_sock=sock)
+    http11_stream = SimpleNamespace(
+        _connection=SimpleNamespace(_network_stream=network_stream)
+    )
+    pool_stream = SimpleNamespace(_stream=http11_stream)
+    response_stream = SimpleNamespace(_httpcore_stream=pool_stream)
+    bound_stream = SimpleNamespace(_stream=response_stream)
+    response = SimpleNamespace(stream=bound_stream)
+
+    pool_entry = SimpleNamespace(
+        _connection=SimpleNamespace(_network_stream=network_stream)
+    )
+    client = SimpleNamespace(
+        _client=SimpleNamespace(
+            _transport=SimpleNamespace(
+                _pool=SimpleNamespace(_connections=[pool_entry])
+            )
+        )
+    )
+
+    assert force_close_tcp_sockets(client, response) == 1
+    assert sock.shutdown_calls == 1
+    assert sock.close_calls == 0
+    assert sock.timeouts == [0]
+
+
 def test_force_close_tcp_sockets_clears_timeout_before_shutdown():
     """Hung SSL recv with timeout=None can ignore SHUT_RDWR until the
     socket timeout is cleared (#85252). Still no close() (#29507)."""

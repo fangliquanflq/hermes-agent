@@ -77,6 +77,66 @@ def test_non_streaming_cancel_does_not_surface_network_error():
     assert elapsed < 10.0, f"interrupt took {elapsed:.1f}s — should be near-instant (guarding the 30s+ hang)"
 
 
+def test_streaming_interrupt_aborts_client_and_active_response_transport(monkeypatch):
+    """The poll thread includes the active SDK response in its abort sweep.
+
+    A worker blocked in ``next(stream)`` cannot reach its owner-thread close
+    check. The response is the only reliable route to the checked-out socket
+    for some OpenAI-compatible transports (#98974).
+    """
+    agent = _make_agent()
+    agent.provider = "openrouter"
+    agent.model = "test-model"
+    agent.base_url = "https://example.invalid/v1"
+    agent.session_id = ""
+    agent.stream_delta_callback = None
+    agent._stream_diag_init.return_value = {}
+
+    released = threading.Event()
+    active_response = types.SimpleNamespace(stream=object())
+
+    class BlockingStream:
+        def __init__(self):
+            self.response = active_response
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            agent._interrupt_requested = True
+            if not released.wait(3.0):
+                raise AssertionError("interrupt did not abort the active stream")
+            raise httpx.RemoteProtocolError("transport aborted")
+
+        def close(self):
+            released.set()
+
+    client = MagicMock()
+    client.chat.completions.create.return_value = BlockingStream()
+    agent._create_request_openai_client.return_value = client
+    agent._close_request_openai_client = MagicMock()
+
+    def abort(request_client, *, reason, response=None):
+        assert request_client is client
+        assert reason == "stream_interrupt_abort"
+        assert response is active_response
+        released.set()
+
+    agent._abort_request_openai_client = MagicMock(side_effect=abort)
+    monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
+
+    with pytest.raises(InterruptedError):
+        cch.interruptible_streaming_api_call(
+            agent,
+            {"model": "test-model", "messages": []},
+        )
+
+    assert (
+        agent._abort_request_openai_client.call_args.kwargs["response"]
+        is active_response
+    )
+
+
 
 
 

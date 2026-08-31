@@ -5230,10 +5230,10 @@ class AIAgent:
         return create_openai_client(self, client_kwargs, reason=reason, shared=shared)
 
     @staticmethod
-    def _force_close_tcp_sockets(client: Any) -> int:
+    def _force_close_tcp_sockets(*transport_roots: Any) -> int:
         """Forwarder — see ``agent.agent_runtime_helpers.force_close_tcp_sockets``."""
         from agent.agent_runtime_helpers import force_close_tcp_sockets
-        return force_close_tcp_sockets(client)
+        return force_close_tcp_sockets(*transport_roots)
 
     def _close_openai_client(self, client: Any, *, reason: str, shared: bool) -> None:
         if client is None:
@@ -5547,7 +5547,13 @@ class AIAgent:
             return
         self._close_openai_client(client, reason=reason, shared=False)
 
-    def _abort_request_openai_client(self, client: Any, *, reason: str) -> None:
+    def _abort_request_openai_client(
+        self,
+        client: Any,
+        *,
+        reason: str,
+        response: Any = None,
+    ) -> None:
         """Cross-thread abort: shut sockets down without releasing FDs.
 
         Companion to :meth:`_close_request_openai_client` for stranger-thread
@@ -5571,7 +5577,11 @@ class AIAgent:
             if cache["client"] is client:
                 cache["poisoned"] = True
         try:
-            shutdown_count = self._force_close_tcp_sockets(client)
+            # During an active SDK stream the concrete connection may only be
+            # reachable from httpx.Response.stream, not from the client's pool
+            # collections. Sweep both roots and deduplicate their sockets so an
+            # interrupt always reaches the checked-out transport (#98974).
+            shutdown_count = self._force_close_tcp_sockets(client, response)
             # tcp_force_closed=0 means the stranger-thread abort found no
             # sockets to shut down — the worker stays blocked in recv and the
             # provider keeps the slot (#72975). Surface that as WARNING so it

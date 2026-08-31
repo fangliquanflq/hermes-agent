@@ -4665,6 +4665,84 @@ def _connection_candidates(conn: Any):
             stack.append(inner)
 
 
+def _existing_transport_attr(value: Any, name: str):
+    """Read a real transport attribute without triggering dynamic proxies."""
+    import inspect
+
+    try:
+        inspect.getattr_static(value, name)
+    except (AttributeError, TypeError):
+        return None
+    try:
+        return getattr(value, name)
+    except Exception:
+        return None
+
+
+def _socket_from_network_stream(stream: Any):
+    """Return the raw socket exposed by an httpcore network stream."""
+    sock = _existing_transport_attr(stream, "_sock")
+    if sock is None:
+        get_extra_info = _existing_transport_attr(stream, "get_extra_info")
+        if callable(get_extra_info):
+            try:
+                sock = get_extra_info("socket")
+            except Exception:
+                sock = None
+    if sock is None:
+        wrapped = _existing_transport_attr(stream, "stream")
+        if wrapped is not None:
+            sock = _existing_transport_attr(wrapped, "_sock")
+    if sock is None:
+        wrapped = _existing_transport_attr(stream, "_stream")
+        extra = _existing_transport_attr(wrapped, "extra")
+        if callable(extra):
+            try:
+                from anyio.abc import SocketAttribute
+
+                sock = extra(SocketAttribute.raw_socket)
+            except Exception:
+                sock = None
+    return sock
+
+
+def _iter_response_stream_sockets(response: Any):
+    """Yield sockets reachable from an active httpx/OpenAI response stream.
+
+    A checked-out streaming response may be the only object still exposing
+    its concrete connection. Walk only known transport-wrapper links; never
+    call ``response.close()`` from the interrupt thread because that releases
+    the FD there (#29507).
+    """
+    seen: set[int] = set()
+    stack = [response]
+    links = (
+        "response",
+        "stream",
+        "_stream",
+        "_httpcore_stream",
+        "_connection",
+        "_network_stream",
+    )
+    while stack:
+        candidate = stack.pop()
+        if candidate is None:
+            continue
+        marker = id(candidate)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        sock = _socket_from_network_stream(candidate)
+        if sock is not None:
+            yield sock
+        for attr in links:
+            # Avoid dynamic proxies (notably unittest.mock) synthesizing a
+            # fresh wrapper at every step and making traversal unbounded.
+            nested = _existing_transport_attr(candidate, attr)
+            if nested is not None and id(nested) not in seen:
+                stack.append(nested)
+
+
 def _iter_pool_sockets(client: Any):
     """Yield raw sockets reachable from an OpenAI/httpx client pool.
 
@@ -4713,29 +4791,7 @@ def _iter_pool_sockets(client: Any):
                 )
                 if stream is None:
                     continue
-                sock = getattr(stream, "_sock", None)
-                if sock is None:
-                    get_extra_info = getattr(stream, "get_extra_info", None)
-                    if callable(get_extra_info):
-                        try:
-                            sock = get_extra_info("socket")
-                        except Exception:
-                            sock = None
-                if sock is None:
-                    wrapped = getattr(stream, "stream", None)
-                    if wrapped is not None:
-                        sock = getattr(wrapped, "_sock", None)
-                if sock is None:
-                    # anyio-backed streams expose the raw socket through
-                    # SocketAttribute.raw_socket when available.
-                    wrapped = getattr(stream, "_stream", None)
-                    extra = getattr(wrapped, "extra", None)
-                    if callable(extra):
-                        try:
-                            from anyio.abc import SocketAttribute
-                            sock = extra(SocketAttribute.raw_socket)
-                        except Exception:
-                            sock = None
+                sock = _socket_from_network_stream(stream)
                 if sock is None:
                     continue
                 marker = id(sock)
@@ -4938,7 +4994,7 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
 
 
 
-def force_close_tcp_sockets(client: Any) -> int:
+def force_close_tcp_sockets(*transport_roots: Any) -> int:
     """Abort in-flight TCP I/O by shutting down sockets WITHOUT closing FDs.
 
     When a provider drops a connection mid-stream — or the user issues an
@@ -4971,31 +5027,44 @@ def force_close_tcp_sockets(client: Any) -> int:
     close atomically swaps ``_fd`` to -1 *before* issuing ``os.close``, there
     is no FD-aliasing window when only one thread closes.
 
+    ``transport_roots`` may include both the SDK client and its active
+    ``httpx.Response``. Sockets exposed by both are shut down only once.
+
     Returns the number of sockets shut down. (Field kept as
     ``tcp_force_closed=N`` in the log line for backwards-compatible parsing.)
     """
     import socket as _socket
 
     shutdown_count = 0
+    seen_sockets: set[int] = set()
     try:
-        for sock in _iter_pool_sockets(client):
-            try:
-                # Clear a blocking timeout first so a hung SSL_read on the
-                # owner thread notices the shutdown. Some stacks ignore
-                # SHUT_RDWR alone while recv is blocked with timeout=None
-                # (#85252). Still no close() — that is the #29507 race.
-                settimeout = getattr(sock, "settimeout", None)
-                if callable(settimeout):
-                    try:
-                        settimeout(0)
-                    except OSError:
-                        pass
-                sock.shutdown(_socket.SHUT_RDWR)
-            except OSError:
-                # Already shut down / not connected / FD invalid — all benign.
-                pass
-            # IMPORTANT (#29507): do NOT call sock.close() here. See docstring.
-            shutdown_count += 1
+        for root in transport_roots:
+            sockets = (
+                *_iter_pool_sockets(root),
+                *_iter_response_stream_sockets(root),
+            )
+            for sock in sockets:
+                marker = id(sock)
+                if marker in seen_sockets:
+                    continue
+                seen_sockets.add(marker)
+                try:
+                    # Clear a blocking timeout first so a hung SSL_read on the
+                    # owner thread notices the shutdown. Some stacks ignore
+                    # SHUT_RDWR alone while recv is blocked with timeout=None
+                    # (#85252). Still no close() — that is the #29507 race.
+                    settimeout = getattr(sock, "settimeout", None)
+                    if callable(settimeout):
+                        try:
+                            settimeout(0)
+                        except OSError:
+                            pass
+                    sock.shutdown(_socket.SHUT_RDWR)
+                except OSError:
+                    # Already shut down / not connected / FD invalid — all benign.
+                    pass
+                # IMPORTANT (#29507): do NOT call sock.close() here. See docstring.
+                shutdown_count += 1
     except Exception as exc:
         _ra().logger.debug("Force-close TCP sockets sweep error: %s", exc)
     return shutdown_count

@@ -3749,7 +3749,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     # threshold instead of burning another stale-timeout×retries cycle.
     _check_stale_giveup(agent)
 
-    request_client_holder = {"client": None, "diag": None, "owner_tid": None}
+    request_client_holder = {
+        "client": None,
+        "response": None,
+        "diag": None,
+        "owner_tid": None,
+    }
     # Transport kind of the registered request client — see the non-streaming
     # variant. Routes _close_request_client_once to anthropic vs openai abort/
     # close helpers (#67142). ``kind="stream"`` registers a per-request
@@ -3771,6 +3776,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     def _set_request_client(client, *, kind: str = "openai"):
         with request_client_lock:
             request_client_holder["client"] = client
+            # A retry gets a new response. Clear the prior attempt atomically
+            # before publishing the new client so an interrupt cannot target a
+            # stale response while the next request is opening.
+            request_client_holder["response"] = None
             request_client_kind["value"] = kind
             # See #29507 explanation in the non-streaming variant above.
             request_client_holder["owner_tid"] = threading.get_ident()
@@ -3842,9 +3851,21 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         request_client, reason=reason
                     )
                 else:
-                    agent._abort_request_openai_client(request_client, reason=reason)
+                    response = request_client_holder.get("response")
+                    if response is None:
+                        agent._abort_request_openai_client(
+                            request_client,
+                            reason=reason,
+                        )
+                    else:
+                        agent._abort_request_openai_client(
+                            request_client,
+                            reason=reason,
+                            response=response,
+                        )
                 return
             request_client_holder["client"] = None
+            request_client_holder["response"] = None
             request_client_holder["owner_tid"] = None
         if request_client is None:
             return
@@ -4058,6 +4079,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
         def _stream_created(raw_stream: Any) -> None:
             response = getattr(raw_stream, "response", None)
+            with request_client_lock:
+                # Publish the checked-out response beside its request client.
+                # The polling thread uses this transport-root fallback when
+                # httpcore's pool collections expose no socket (#98974).
+                request_client_holder["response"] = response
             attempt_stream_response["value"] = response
             agent._capture_rate_limits(response)
             agent._capture_credits(response)
