@@ -480,7 +480,6 @@ def _kill_stale_dashboard_processes(
                 failed.append((pid, str(e)))
     else:
         import signal as _signal
-        import time as _time
 
         # SIGTERM first — give each process a chance to shut down cleanly
         # (uvicorn closes its socket, flushes logs, etc.).
@@ -493,33 +492,28 @@ def _kill_stale_dashboard_processes(
             except (PermissionError, OSError) as e:
                 failed.append((pid, str(e)))
 
-        # Poll for exit up to ~3s total.
-        deadline = _time.monotonic() + 3.0
         pending = [
             p for p in pids if p not in killed and p not in {f[0] for f in failed}
         ]
-        while pending and _time.monotonic() < deadline:
-            _time.sleep(0.1)
-            still_pending = []
-            # On Windows, os.kill(pid, 0) is NOT a no-op. Route through
-            # the cross-platform existence check.
-            from gateway.status import _pid_exists
-            for pid in pending:
-                if _pid_exists(pid):
-                    still_pending.append(pid)
-                else:
-                    killed.append(pid)
-            pending = still_pending
+        pending = _wait_for_dashboard_pids_to_exit(pending, timeout=3.0)
+        killed.extend(pid for pid in pids if pid not in pending and pid not in killed)
 
         # SIGKILL any survivors.
+        kill_sent: list[int] = []
         for pid in pending:
             try:
                 os.kill(pid, _signal.SIGKILL)
-                killed.append(pid)
+                kill_sent.append(pid)
             except ProcessLookupError:
                 killed.append(pid)
             except (PermissionError, OSError) as e:
                 failed.append((pid, str(e)))
+
+        still_alive = _wait_for_dashboard_pids_to_exit(kill_sent, timeout=2.0)
+        killed.extend(pid for pid in kill_sent if pid not in still_alive)
+        failed.extend(
+            (pid, "process remained alive after SIGKILL") for pid in still_alive
+        )
 
     for pid in killed:
         print(f"    ✓ stopped PID {pid}")
@@ -583,6 +577,22 @@ def _kill_stale_dashboard_processes(
         "failed": list(failed),
         "unrecovered": list(unrecovered),
     }
+
+
+def _wait_for_dashboard_pids_to_exit(pids: list[int], *, timeout: float) -> list[int]:
+    """Wait a bounded interval and return dashboard PIDs that remain alive."""
+    import time
+
+    from gateway.status import _pid_exists
+
+    remaining = list(pids)
+    deadline = time.monotonic() + timeout
+    while remaining:
+        remaining = [pid for pid in remaining if _pid_exists(pid)]
+        if not remaining or time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+    return remaining
 
 def _detect_concurrent_hermes_instances(
     scripts_dir: Path, *, exclude_pid: int | None = None

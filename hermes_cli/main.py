@@ -8873,12 +8873,76 @@ def _dashboard_cmdline_for_pid(pid: int) -> list[str] | None:
         return None
 
 
+def _dashboard_port_from_command(command: list[str]) -> int | None:
+    """Return the fixed dashboard/serve port encoded by *command*."""
+    port_text = "9119"
+    for index, token in enumerate(command):
+        if token == "--port" and index + 1 < len(command):
+            port_text = str(command[index + 1])
+        elif token.startswith("--port="):
+            port_text = token.split("=", 1)[1]
+    try:
+        port = int(port_text)
+    except (TypeError, ValueError):
+        return None
+    return port if 0 < port <= 65535 else None
+
+
+def _verify_dashboard_respawn(
+    process, command: list[str], *, timeout: float = 10.0
+) -> tuple[bool, str]:
+    """Verify that *process* survives and owns the command's listening port."""
+    import time
+
+    import psutil
+
+    port = _dashboard_port_from_command(command)
+    if port is None:
+        return False, "command does not specify a verifiable fixed port"
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    last_reason = f"port {port} did not enter LISTEN state"
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            return False, f"process exited before serving (exit code {returncode})"
+
+        try:
+            root = psutil.Process(process.pid)
+            owner_pids = {process.pid}
+            owner_pids.update(child.pid for child in root.children(recursive=True))
+            listeners = [
+                conn
+                for conn in psutil.net_connections(kind="inet")
+                if conn.status == psutil.CONN_LISTEN
+                and conn.laddr
+                and conn.laddr.port == port
+            ]
+            if any(conn.pid in owner_pids for conn in listeners):
+                return True, ""
+            if listeners:
+                listener_pids = sorted(
+                    {conn.pid for conn in listeners if conn.pid is not None}
+                )
+                last_reason = (
+                    f"listener on port {port} is not owned by PID {process.pid} "
+                    f"or its children (listener PIDs: {listener_pids or ['unknown']})"
+                )
+        except (psutil.Error, OSError) as exc:
+            last_reason = f"could not verify listener ownership on port {port}: {exc}"
+
+        if time.monotonic() >= deadline:
+            return False, last_reason
+        time.sleep(0.2)
+
+
 def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
-    """Best-effort respawn of manually-started dashboards after ``hermes update``.
+    """Respawn and verify manually-started dashboards after ``hermes update``.
 
     Spawns each recovered argv detached (new session, output to the profile's
-    ``logs/dashboard-restart.log``).  Returns the commands that failed to
-    spawn; the caller prints the manual hint for those.
+    ``logs/dashboard-restart.log``). A spawn counts as successful only after
+    the child survives and owns the fixed listening port. Returns the original
+    commands that failed either spawn or verification.
 
     Callers must pre-filter via ``_filter_dashboard_respawn_candidates`` so
     Desktop ``serve|dashboard --port 0`` backends are not replayed and
@@ -8894,14 +8958,15 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
     except OSError:
         pass
 
-    for command in commands:
+    for original_command in commands:
+        command = list(original_command)
         try:
             # Keep restarted dashboards headless; reopening a browser after a
             # background update is noisy and fails in SSH/headless sessions.
             if "dashboard" in command and "--no-open" not in command:
-                command = [*command, "--no-open"]
+                command.append("--no-open")
             with open(log_path, "ab") as log_f:
-                subprocess.Popen(
+                process = subprocess.Popen(
                     command,
                     stdin=subprocess.DEVNULL,
                     stdout=log_f,
@@ -8909,9 +8974,13 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
                     start_new_session=True,
                     close_fds=True,
                 )
-            respawned.append(command)
+            verified, reason = _verify_dashboard_respawn(process, command)
+            if verified:
+                respawned.append(command)
+            else:
+                failed.append((list(original_command), reason))
         except (OSError, ValueError) as exc:
-            failed.append((command, str(exc)))
+            failed.append((list(original_command), str(exc)))
 
     for command in respawned:
         print(f"    ✓ restarted: {shlex.join(command)}")

@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -218,6 +219,27 @@ class TestKillStaleDashboardPosix:
         assert "✓ stopped PID 12346" in out
         assert "Restart the dashboard" in out
 
+    def test_sigkill_survivor_is_reported_as_failed_not_stopped(self, capsys):
+        import signal as _signal
+
+        signals: list[int] = []
+        with patch(
+            "hermes_cli.main._find_stale_dashboard_pids", return_value=[12345]
+        ), patch("os.kill", side_effect=lambda _pid, sig: signals.append(sig)), patch(
+            "hermes_cli.dashboard_procs._wait_for_dashboard_pids_to_exit",
+            side_effect=[[12345], [12345]],
+        ):
+            result = _kill_stale_dashboard_processes()
+
+        assert signals == [_signal.SIGTERM, _signal.SIGKILL]
+        assert result["killed"] == []
+        assert result["failed"] == [
+            (12345, "process remained alive after SIGKILL")
+        ]
+        out = capsys.readouterr().out
+        assert "✓ stopped PID 12345" not in out
+        assert "✗ failed to stop PID 12345" in out
+
 
 
 
@@ -307,9 +329,33 @@ class TestDashboardUpdateCleanup:
             return_value={"matched": [12345], "killed": [], "failed": [(12345, "denied")],
                           "unrecovered": []},
         ):
-            _finish_dashboard_update_cleanup([])
+            with pytest.raises(SystemExit) as exc_info:
+                _finish_dashboard_update_cleanup([])
 
+        assert exc_info.value.code == 1
         assert "stopped during update" not in capsys.readouterr().out
+
+    def test_unrecovered_restart_records_failure_and_exits_nonzero(self):
+        from hermes_cli import update_receipt
+
+        with patch(
+            "hermes_cli.main._kill_stale_dashboard_processes",
+            return_value={
+                "matched": [12345],
+                "killed": [12345],
+                "failed": [],
+                "unrecovered": [12345],
+            },
+        ), patch.object(update_receipt, "record_step") as record_step:
+            with pytest.raises(SystemExit) as exc_info:
+                _finish_dashboard_update_cleanup([])
+
+        assert exc_info.value.code == 1
+        record_step.assert_called_once_with(
+            "dashboard_restart",
+            False,
+            "1 dashboard/serve process(es) were not recovered",
+        )
 
 
 class TestWindowsWmicEncoding:
@@ -544,7 +590,9 @@ class TestManualBackendRespawn:
             def __init__(self, cmd, **kwargs):
                 spawned.append(list(cmd))
 
-        with patch.object(live.subprocess, "Popen", _FakePopen):
+        with patch.object(live.subprocess, "Popen", _FakePopen), patch.object(
+            live, "_verify_dashboard_respawn", return_value=(True, "")
+        ):
             failed = live._respawn_dashboard_processes([
                 ["hermes", "dashboard", "--port", "8300"],
                 ["hermes", "serve", "--host", "0.0.0.0"],
@@ -564,6 +612,72 @@ class TestManualBackendRespawn:
         assert failed == [["hermes", "serve"]]
         out = capsys.readouterr().out
         assert "✗ failed to restart" in out
+
+    def test_spawn_success_is_not_restart_success_without_verification(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        live = self._live()
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+        process = MagicMock(pid=4321)
+
+        with patch.object(live.subprocess, "Popen", return_value=process), patch.object(
+            live,
+            "_verify_dashboard_respawn",
+            return_value=(False, "listener on port 8300 is not owned by PID 4321"),
+            create=True,
+        ):
+            failed = live._respawn_dashboard_processes(
+                [["hermes", "dashboard", "--port", "8300"]]
+            )
+
+        assert failed == [["hermes", "dashboard", "--port", "8300"]]
+        out = capsys.readouterr().out
+        assert "✓ restarted" not in out
+        assert "listener on port 8300 is not owned by PID 4321" in out
+
+    def test_respawn_verifier_requires_listener_owned_by_new_process(self):
+        live = self._live()
+        process = MagicMock(pid=4321)
+        process.poll.return_value = None
+        psutil_process = MagicMock()
+        psutil_process.children.return_value = []
+
+        old_listener = SimpleNamespace(
+            status="LISTEN", laddr=SimpleNamespace(port=8300), pid=1234
+        )
+        new_listener = SimpleNamespace(
+            status="LISTEN", laddr=SimpleNamespace(port=8300), pid=4321
+        )
+
+        with patch("psutil.Process", return_value=psutil_process), patch(
+            "psutil.net_connections", return_value=[old_listener]
+        ):
+            ok, reason = live._verify_dashboard_respawn(
+                process, ["hermes", "dashboard", "--port", "8300"], timeout=0
+            )
+        assert not ok
+        assert "not owned by PID 4321" in reason
+
+        with patch("psutil.Process", return_value=psutil_process), patch(
+            "psutil.net_connections", return_value=[new_listener]
+        ):
+            ok, reason = live._verify_dashboard_respawn(
+                process, ["hermes", "dashboard", "--port", "8300"], timeout=0
+            )
+        assert ok
+        assert reason == ""
+
+    def test_respawn_verifier_rejects_child_that_exits_before_serving(self):
+        live = self._live()
+        process = MagicMock(pid=4321)
+        process.poll.return_value = 1
+
+        ok, reason = live._verify_dashboard_respawn(
+            process, ["hermes", "dashboard", "--port", "8300"], timeout=0
+        )
+
+        assert not ok
+        assert reason == "process exited before serving (exit code 1)"
 
 
 class TestFilterDashboardRespawnCandidates:

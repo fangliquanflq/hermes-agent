@@ -1099,6 +1099,14 @@ def _finish_dashboard_update_cleanup(
         print()
         print("  ℹ Leaving running dashboard process(es) untouched because the")
         print("    Node.js dependency refresh did not complete.")
+        try:
+            from hermes_cli.update_receipt import record_skip
+
+            record_skip(
+                "dashboard_restart", "Node.js dependency refresh did not complete"
+            )
+        except Exception:
+            pass
         return
 
     # The scan path lazy-imports symbols from _subprocess_compat; make sure
@@ -1108,16 +1116,35 @@ def _finish_dashboard_update_cleanup(
     stop_result = _m()._kill_stale_dashboard_processes(
         restart_managed=True, already_restarted_units=already_restarted_units
     )
-    if not stop_result.get("unrecovered"):
+    failed_count = len(stop_result.get("failed") or []) + len(
+        stop_result.get("unrecovered") or []
+    )
+    try:
+        from hermes_cli.update_receipt import record_step
+
+        record_step(
+            "dashboard_restart",
+            failed_count == 0,
+            (
+                "all detected dashboard/serve processes were recovered"
+                if failed_count == 0
+                else f"{failed_count} dashboard/serve process(es) were not recovered"
+            ),
+        )
+    except Exception:
+        pass
+
+    if failed_count == 0:
         return
 
     print()
     print(
-        "⚠ A web dashboard/serve process was stopped during update and could "
-        "not be auto-restarted."
+        "⚠ A web dashboard/serve process could not be stopped or recovered "
+        "during update."
     )
     print("  Re-launch it when you want the web UI back:")
     print("    hermes dashboard --port <port>")
+    raise SystemExit(1)
 
 def _atomic_replace_dir(src: str, dst: str) -> None:
     """Replace directory *dst* with *src* without leaving *dst* half-deleted.
