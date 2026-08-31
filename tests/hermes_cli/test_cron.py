@@ -128,6 +128,46 @@ class TestCronCommandLifecycle:
         assert jobs[0]["skills"] == ["blogwatcher", "maps"]
         assert jobs[0]["name"] == "Skill combo"
 
+    def test_create_prints_profile_resolved_script_path(
+        self, tmp_cron_dir, tmp_path, monkeypatch, capsys
+    ):
+        profile_home = tmp_path / "profiles" / "analyst"
+        script = profile_home / "scripts" / "watchdog.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("print('ok')\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+
+        cron_command(
+            Namespace(
+                cron_command="create",
+                schedule="every 1h",
+                prompt=None,
+                name="Watchdog",
+                deliver=None,
+                repeat=None,
+                skill=None,
+                skills=None,
+                script="watchdog.py",
+                workdir=None,
+                no_agent=True,
+            )
+        )
+
+        assert f"Script: {script.resolve()}" in capsys.readouterr().out
+
+    def test_create_help_describes_profile_scoped_script_root(self, capsys):
+        parser = argparse.ArgumentParser(prog="hermes")
+        subparsers = parser.add_subparsers(dest="command")
+        build_cron_parser(subparsers, cmd_cron=cron_command)
+
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["cron", "create", "--help"])
+
+        assert exc_info.value.code == 0
+        help_text = capsys.readouterr().out
+        assert "<HERMES_HOME>/scripts/" in help_text
+        assert "profile-scoped" in help_text
+
 
 class TestCronDoctor:
     def test_doctor_reports_cron_health_issues(self, tmp_cron_dir, capsys):

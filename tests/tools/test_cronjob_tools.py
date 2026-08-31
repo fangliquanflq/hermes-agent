@@ -246,6 +246,47 @@ class TestUnifiedCronjobTool:
         assert listing["jobs"][0]["name"] == "Server Check"
         assert listing["jobs"][0]["state"] == "scheduled"
 
+    def test_create_rejects_missing_script_in_active_profile(
+        self, tmp_path, monkeypatch
+    ):
+        profile_home = tmp_path / "profiles" / "analyst"
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+
+        created = json.loads(
+            cronjob(
+                action="create",
+                schedule="every 1h",
+                script="watchdog.py",
+                no_agent=True,
+            )
+        )
+
+        expected = profile_home / "scripts" / "watchdog.py"
+        assert created["success"] is False
+        assert str(expected.resolve()) in created["error"]
+        assert "does not exist" in created["error"]
+        assert json.loads(cronjob(action="list"))["count"] == 0
+
+    def test_create_accepts_script_from_active_profile(self, tmp_path, monkeypatch):
+        profile_home = tmp_path / "profiles" / "analyst"
+        script = profile_home / "scripts" / "watchdog.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("print('ok')\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+
+        created = json.loads(
+            cronjob(
+                action="create",
+                schedule="every 1h",
+                script="watchdog.py",
+                no_agent=True,
+            )
+        )
+
+        assert created["success"] is True
+        assert created["job"]["script"] == "watchdog.py"
+
     def test_create_with_natural_weekday_schedule(self):
         # The documented "every monday 9am" form must create a real cron job
         # through the tool path, not error out (issue: parser rejected it).

@@ -713,7 +713,10 @@ def cron_create(args):
         print(f"  Skills: {', '.join(result['skills'])}")
     job_data = result.get("job", {})
     if job_data.get("script"):
-        print(f"  Script: {job_data['script']}")
+        from hermes_constants import get_hermes_home
+
+        script_path = (get_hermes_home() / "scripts" / job_data["script"]).resolve()
+        print(f"  Script: {script_path}")
     if job_data.get("monitor_script"):
         print(f"  Monitor: {job_data['monitor_script']} (agent runs only on output change)")
     if job_data.get("monitor_url"):

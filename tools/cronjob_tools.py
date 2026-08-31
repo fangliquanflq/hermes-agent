@@ -727,12 +727,13 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
     raw = script.strip()
 
     # Reject absolute paths and ~ expansion at the API boundary.
-    # Only relative paths within ~/.hermes/scripts/ are allowed.
+    # Only relative paths within the active profile's scripts directory are allowed.
     if raw.startswith(("/", "~")) or (len(raw) >= 2 and raw[1] == ":"):
         return (
-            f"Script path must be relative to ~/.hermes/scripts/. "
+            "Script path must be relative to the active profile's "
+            "<HERMES_HOME>/scripts/ directory. "
             f"Got absolute or home-relative path: {raw!r}. "
-            f"Place scripts in ~/.hermes/scripts/ and use just the filename."
+            "Place the script there and use its relative path."
         )
 
     # Validate containment after resolution
@@ -745,6 +746,12 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
         return (
             f"Script path escapes the scripts directory via traversal: {raw!r}"
         )
+
+    resolved = (scripts_dir / raw).resolve()
+    if not resolved.exists():
+        return f"Script does not exist in the active profile: {resolved}"
+    if not resolved.is_file():
+        return f"Script path is not a file in the active profile: {resolved}"
 
     return None
 
