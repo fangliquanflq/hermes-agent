@@ -5675,6 +5675,53 @@ def test_init_session_fires_reset_hook(monkeypatch):
         server._sessions.pop(sid, None)
 
 
+def test_init_session_warns_when_history_will_not_be_persisted(monkeypatch):
+    emitted = []
+
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    monkeypatch.setattr(server, "_db_error", "invalid state.db text")
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server, "_start_notification_poller", lambda *_args: None)
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args: None)
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {})
+    monkeypatch.setattr(
+        server, "_emit", lambda event, sid, payload=None: emitted.append((event, sid, payload))
+    )
+
+    import tools.approval as _approval
+
+    monkeypatch.setattr(_approval, "register_gateway_notify", lambda key, cb: None)
+    monkeypatch.setattr(_approval, "load_permanent_allowlist", lambda: None)
+
+    sid = "persistence-degraded"
+    try:
+        server._init_session(
+            sid,
+            "session-key",
+            types.SimpleNamespace(model="x"),
+            history=[],
+        )
+    finally:
+        server._sessions.pop(sid, None)
+
+    notices = [event for event in emitted if event[0] == "notification.show"]
+    assert notices == [
+        (
+            "notification.show",
+            sid,
+            {
+                "key": "session.persistence.unavailable",
+                "kind": "sticky",
+                "level": "error",
+                "text": (
+                    "Session history is not being saved because state.db is "
+                    "unavailable. Run `hermes doctor` before continuing."
+                ),
+            },
+        )
+    ]
+
+
 def test_session_title_creates_row_and_sets_immediately_when_not_ready(monkeypatch):
     """An explicit /title before the first message must persist NOW, not queue.
 

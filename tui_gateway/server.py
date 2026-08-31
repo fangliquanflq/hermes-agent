@@ -9060,6 +9060,20 @@ def _init_session(
             db = None
     else:
         db = _get_db()
+    if db is None:
+        _emit(
+            "notification.show",
+            sid,
+            {
+                "key": "session.persistence.unavailable",
+                "kind": "sticky",
+                "level": "error",
+                "text": (
+                    "Session history is not being saved because state.db is "
+                    "unavailable. Run `hermes doctor` before continuing."
+                ),
+            },
+        )
     try:
         if db is not None:
             row = db.get_session(key) if hasattr(db, "get_session") else None

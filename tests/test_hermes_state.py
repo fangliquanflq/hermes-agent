@@ -235,6 +235,29 @@ class TestConnectionLifecycle:
             "fts-read-only"
         ]
 
+    @pytest.mark.parametrize(
+        "decode_error",
+        [
+            UnicodeDecodeError("utf-8", b"\x81", 0, 1, "invalid start byte"),
+            sqlite3.OperationalError(
+                "Could not decode to UTF-8 column 'content' with text '�'"
+            ),
+        ],
+    )
+    def test_fts_probe_decode_failure_degrades_to_non_fts_reads(
+        self, tmp_path, decode_error
+    ):
+        """Bad text in an FTS vtable must not abort SessionDB construction."""
+
+        class DecodeFailingCursor:
+            def execute(self, _sql):
+                raise decode_error
+
+        db = SessionDB.__new__(SessionDB)
+        db.db_path = tmp_path / "state.db"
+
+        assert db._fts_table_probe(DecodeFailingCursor(), "messages_fts") is None
+
     def test_failed_read_only_open_does_not_leak_tracked_connection(
         self, tmp_path
     ):

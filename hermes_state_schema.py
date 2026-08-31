@@ -382,10 +382,27 @@ class SessionSchemaMixin:
         )
 
     def _fts_table_probe(self, cursor: sqlite3.Cursor, table_name: str) -> Optional[bool]:
+        def degrade_decode_failure(exc: Exception) -> None:
+            logger.warning(
+                "FTS table %s in %s contains undecodable text; disabling this "
+                "FTS search path while keeping non-FTS session reads available: %s",
+                table_name,
+                self.db_path,
+                exc,
+            )
+
         try:
             cursor.execute(f"SELECT * FROM {table_name} LIMIT 0")
             return True
+        except UnicodeDecodeError as exc:
+            degrade_decode_failure(exc)
+            return None
         except sqlite3.OperationalError as exc:
+            # Python/SQLite version combinations disagree on whether malformed
+            # TEXT arrives as UnicodeDecodeError or this OperationalError.
+            if "could not decode to utf-8" in str(exc).lower():
+                degrade_decode_failure(exc)
+                return None
             if self._is_fts5_unavailable_error(exc):
                 # Only disable FTS entirely when the whole module is missing.
                 # A missing trigram tokenizer only affects trigram searches.
