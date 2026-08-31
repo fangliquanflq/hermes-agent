@@ -67,7 +67,41 @@ def test_kanban_show_text_renders_graph_with_open_connection(kanban_home):
 
     assert f"Task {child_id}: child task" in output
     assert f"parents:   {parent_id}" in output
+    assert "Events (2):" in output
+    assert "earlier events not shown" not in output
     assert "Cannot operate on a closed database" not in output
+
+
+def test_kanban_show_text_discloses_truncated_events(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="long event history")
+        for index in range(21):
+            kb._append_event(conn, task_id, f"event_{index}")
+        conn.commit()
+
+    output = kc.run_slash(f"show {task_id}")
+
+    assert "Events (20 of 22):" in output
+    assert "2 earlier events not shown; use --all to show all" in output
+    assert " created " not in output
+    assert " event_0" not in output
+    assert " event_1" in output
+
+
+def test_kanban_show_all_prints_complete_event_history(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="complete event history")
+        for index in range(21):
+            kb._append_event(conn, task_id, f"event_{index}")
+        conn.commit()
+
+    output = kc.run_slash(f"show {task_id} --all")
+
+    assert "Events (22):" in output
+    assert "earlier events not shown" not in output
+    assert " created " in output
+    assert " event_0" in output
+    assert " event_20" in output
 
 
 def test_board_override_is_isolated_per_concurrent_call(kanban_home, monkeypatch):

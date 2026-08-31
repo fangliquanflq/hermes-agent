@@ -461,6 +461,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_show.add_argument("task_id")
     p_show.add_argument("--json", action="store_true")
     p_show.add_argument(
+        "--all",
+        dest="all_events",
+        action="store_true",
+        help="Show the complete event history instead of the latest 20",
+    )
+    p_show.add_argument(
         "--state-type",
         choices=("status", "outcome"),
         default=None,
@@ -1835,8 +1841,19 @@ def _cmd_show(args: argparse.Namespace) -> int:
             print(f"  [{_fmt_ts(c.created_at)}] {c.author}: {c.body}")
     if events:
         print()
-        print(f"Events ({len(events)}):")
-        for e in events[-20:]:
+        displayed_events = (
+            events if getattr(args, "all_events", False) else events[-20:]
+        )
+        omitted_events = len(events) - len(displayed_events)
+        if omitted_events:
+            print(f"Events ({len(displayed_events)} of {len(events)}):")
+            print(
+                f"  … {omitted_events} earlier events not shown; "
+                "use --all to show all"
+            )
+        else:
+            print(f"Events ({len(events)}):")
+        for e in displayed_events:
             pl = f" {e.payload}" if e.payload else ""
             run_tag = f" [run {e.run_id}]" if e.run_id else ""
             print(f"  [{_fmt_ts(e.created_at)}]{run_tag} {e.kind}{pl}")
