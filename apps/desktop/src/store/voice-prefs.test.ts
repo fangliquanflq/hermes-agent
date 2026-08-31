@@ -1,11 +1,53 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('@/hermes', () => ({
-  getHermesConfigRecord: vi.fn(async () => ({})),
-  saveHermesConfig: vi.fn(async () => undefined)
+const { getHermesConfigRecord, saveHermesConfig } = vi.hoisted(() => ({
+  getHermesConfigRecord: vi.fn(),
+  saveHermesConfig: vi.fn()
 }))
 
-import { $voiceStopPhrase, applyVoiceStopPhraseFromConfig } from './voice-prefs'
+vi.mock('@/hermes', () => ({
+  getHermesConfigRecord,
+  saveHermesConfig
+}))
+
+import {
+  $autoSpeakReplies,
+  $voiceStopPhrase,
+  applyAutoSpeakFromConfig,
+  applyVoiceStopPhraseFromConfig,
+  setAutoSpeakReplies
+} from './voice-prefs'
+
+describe('desktop auto-speak preference', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    $autoSpeakReplies.set(false)
+    getHermesConfigRecord.mockResolvedValue({
+      desktop: { repo_scan_enabled: true },
+      voice: { auto_tts: false, thinking_sound: true }
+    })
+    saveHermesConfig.mockResolvedValue(undefined)
+  })
+
+  it('loads the desktop preference independently of gateway auto-TTS', () => {
+    applyAutoSpeakFromConfig({
+      desktop: { auto_speak_replies: true },
+      voice: { auto_tts: false }
+    })
+
+    expect($autoSpeakReplies.get()).toBe(true)
+  })
+
+  it('persists only the desktop preference and preserves gateway auto-TTS', async () => {
+    await setAutoSpeakReplies(true)
+
+    expect(saveHermesConfig).toHaveBeenCalledWith({
+      desktop: { repo_scan_enabled: true, auto_speak_replies: true },
+      voice: { auto_tts: false, thinking_sound: true }
+    })
+    expect($autoSpeakReplies.get()).toBe(true)
+  })
+})
 
 describe('applyVoiceStopPhraseFromConfig', () => {
   it('defaults to "stop" when the key is absent (backend default applies)', () => {

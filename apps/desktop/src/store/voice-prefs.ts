@@ -2,14 +2,21 @@ import { atom } from 'nanostores'
 
 import { getHermesConfigRecord, saveHermesConfig } from '@/hermes'
 
-// "Read replies aloud" — mirrors the canonical `voice.auto_tts` config key (also
-// in Settings → Voice, honored by the messaging gateway) so the composer toggle
-// and the Settings switch are one source of truth, not two that can disagree.
+// "Read replies aloud" is a Desktop playback preference. Keep it separate from
+// `voice.auto_tts`, which controls voice delivery in CLI and messaging surfaces.
 export const $autoSpeakReplies = atom<boolean>(false)
 
 /** Seed the atom from a loaded config payload (mount / refresh). */
-export function applyAutoSpeakFromConfig(config: { voice?: { auto_tts?: unknown } | null } | null | undefined) {
-  $autoSpeakReplies.set(Boolean(config?.voice?.auto_tts))
+export function applyAutoSpeakFromConfig(
+  config:
+    | {
+        desktop?: { auto_speak_replies?: unknown } | null
+        voice?: { auto_tts?: unknown } | null
+      }
+    | null
+    | undefined
+) {
+  $autoSpeakReplies.set(Boolean(config?.desktop?.auto_speak_replies))
 }
 
 // First configured `voice.stop_phrases` entry — drives the "Say "stop" to end
@@ -64,9 +71,11 @@ export async function setAutoSpeakReplies(enabled: boolean): Promise<void> {
 
   try {
     const record = await getHermesConfigRecord()
-    const voice = record.voice && typeof record.voice === 'object' ? (record.voice as Record<string, unknown>) : {}
 
-    await saveHermesConfig({ ...record, voice: { ...voice, auto_tts: enabled } })
+    const desktop =
+      record.desktop && typeof record.desktop === 'object' ? (record.desktop as Record<string, unknown>) : {}
+
+    await saveHermesConfig({ ...record, desktop: { ...desktop, auto_speak_replies: enabled } })
   } catch (error) {
     $autoSpeakReplies.set(previous)
     throw error

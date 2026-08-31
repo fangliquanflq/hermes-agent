@@ -3764,6 +3764,9 @@ DEFAULT_CONFIG = {
     # Hermes Desktop (Electron app) launch options. These only affect
     # `hermes desktop`; they do not touch the CLI/gateway.
     "desktop": {
+        # Renderer-local playback of completed assistant replies. This is
+        # intentionally independent from voice.auto_tts (gateway delivery).
+        "auto_speak_replies": False,
         # Git repository discovery for the Desktop Projects sidebar. Empty
         # roots preserve the historical bounded scan of the user's home.
         "repo_scan_enabled": True,

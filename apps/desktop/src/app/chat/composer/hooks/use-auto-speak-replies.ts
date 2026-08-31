@@ -27,8 +27,8 @@ interface UseAutoSpeakReplies {
 }
 
 /**
- * Pure-TTS auto-speak: when `voice.auto_tts` is on, read each completed assistant
- * turn aloud — no dictation, no conversation loop. Stays off while a full voice
+ * Pure-TTS auto-speak: when `desktop.auto_speak_replies` is on, read each
+ * completed assistant turn aloud — no dictation, no conversation loop. Stays off while a full voice
  * conversation runs (it speaks replies itself) and never overlaps clips: a reply
  * landing mid-playback is held and spoken on the playback-idle edge. Always reads
  * the latest reply, so a backlog collapses to the newest.

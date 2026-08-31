@@ -334,6 +334,7 @@ export interface HermesConfig {
     timestamps?: boolean
   }
   desktop?: {
+    auto_speak_replies?: boolean
     repo_scan_enabled?: boolean
     repo_scan_roots?: string[]
     repo_scan_exclude_paths?: string[]
