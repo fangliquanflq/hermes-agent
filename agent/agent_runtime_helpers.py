@@ -5096,7 +5096,7 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
         # a text block at the end.
         try:
             blocks = list(existing_content) if existing_content else []
-            blocks.append({"type": "text", "text": marker.lstrip()})
+            blocks.append({"type": "text", "text": marker})
             messages[target_idx]["content"] = blocks
         except Exception:
             # Fall back to string replacement if content shape is unexpected.

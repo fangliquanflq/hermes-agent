@@ -546,6 +546,30 @@ class TestSteerInjection:
         assert new_content[1]["type"] == "text"
         assert "extra note" in new_content[1]["text"]
 
+    def test_multimodal_steer_survives_compression(self):
+        from agent.conversation_compression import _ensure_compressed_has_user_turn
+
+        agent = _bare_agent()
+        steer = "cancel the historical request"
+        agent.steer(steer)
+        original = [
+            {"role": "user", "content": "historical request"},
+            {"role": "assistant", "content": "Working on it."},
+            {
+                "role": "tool",
+                "content": [{"type": "text", "text": "existing output"}],
+                "tool_call_id": "1",
+            },
+        ]
+        agent._apply_pending_steer_to_tool_results(original, num_tool_msgs=1)
+        compressed = [{"role": "assistant", "content": "Compression summary."}]
+
+        outcome = _ensure_compressed_has_user_turn(original, compressed)
+
+        assert outcome == "steer_inserted"
+        user_turns = [message for message in compressed if message.get("role") == "user"]
+        assert [message["content"] for message in user_turns] == [steer]
+
 
 
 class TestSteerThreadSafety:

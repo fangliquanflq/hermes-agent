@@ -3052,7 +3052,13 @@ def _pending_steer_user_anchor(messages: list) -> Optional[dict]:
         length_text = text[
             length_start + len(length_prefix) : -len(marker_suffix)
         ]
-        if not length_text.isdecimal():
+        # A generated length can never need more digits than the number of
+        # characters before its footer.  Bound it before int() so a forged
+        # thousands-digit footer cannot trip Python's conversion limit.
+        if (
+            not length_text.isdecimal()
+            or len(length_text) > len(str(length_start))
+        ):
             continue
         steer_length = int(length_text)
         steer_start = length_start - steer_length
