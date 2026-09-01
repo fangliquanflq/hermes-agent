@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 class UIElement:
     """One interactable element on the current screen."""
 
-    index: int                       # 1-based SOM index
+    index: int                       # 0-based SOM index from cua-driver
     role: str                        # AX role (AXButton, AXTextField, ...)
     label: str = ""                  # AXTitle / AXDescription / AXValue snippet
     bounds: Tuple[int, int, int, int] = (0, 0, 0, 0)  # x, y, w, h (logical px)
@@ -211,9 +211,9 @@ class ComputerUseBackend(ABC):
     # ── Native-value mutation ────────────────────────────────────────
     @abstractmethod
     def set_value(self, value: str, element: Optional[int] = None) -> ActionResult:
-        """Set a native value on an element (e.g. AXPopUpButton selection).
+        """Replace a native value (e.g. AXPopUpButton or AXTextArea content).
 
-        `element` is the 1-based SOM index returned by a prior capture call.
+        `element` is the 0-based SOM index returned by a prior capture call.
         """
 
     # ── Timing ──────────────────────────────────────────────────────

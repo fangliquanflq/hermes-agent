@@ -58,6 +58,29 @@ class TestSchema:
         from tools.computer_use.schema import COMPUTER_USE_SCHEMA
         assert "max_elements" not in COMPUTER_USE_SCHEMA["parameters"]["properties"]
 
+    def test_schema_documents_driver_element_indices_without_rebasing(self):
+        from tools.computer_use.schema import COMPUTER_USE_SCHEMA
+
+        description = (
+            COMPUTER_USE_SCHEMA["parameters"]["properties"]["element"]["description"]
+            .lower()
+        )
+        assert "0-based" in description
+        assert "do not adjust" in description
+
+    def test_schema_distinguishes_set_value_replacement_from_typing(self):
+        from tools.computer_use.schema import COMPUTER_USE_SCHEMA
+
+        properties = COMPUTER_USE_SCHEMA["parameters"]["properties"]
+        action_description = properties["action"]["description"].lower()
+        value_description = properties["value"]["description"].lower()
+        type_description = properties["text"]["description"].lower()
+
+        assert "axtextarea" in action_description
+        assert "contenteditable" in action_description
+        assert "replaces" in value_description
+        assert "appends" in type_description
+
 
 class TestRegistration:
     def test_tool_registers_with_registry(self):
@@ -1804,6 +1827,16 @@ class TestClickButtonPassthrough:
             "not silently mapped to left (the original Surface 5 bug)."
         )
 
+    def test_zero_element_index_passes_through_unchanged(self):
+        backend = self._backend_with_active_target()
+
+        res = backend.click(element=0)
+
+        assert res.ok
+        name, args = backend._session.call_tool.call_args.args
+        assert name == "click"
+        assert args["element_index"] == 0
+
 
     def test_coordinate_drag_and_scroll_keep_the_captured_window(self):
         backend = self._backend_with_active_target()
@@ -2071,6 +2104,15 @@ class TestStructuredElementsConsumption:
         assert out[0].label == "OK"
         assert out[0].bounds == (10, 20, 80, 30)
         assert out[1].bounds == (100, 50, 200, 24)
+
+    def test_structured_parser_preserves_zero_element_index(self):
+        from tools.computer_use.cua_backend import _parse_elements_from_structured
+
+        out = _parse_elements_from_structured([
+            {"element_index": 0, "role": "AXButton", "label": "Back"},
+        ])
+
+        assert [element.index for element in out] == [0]
 
 
     def test_vision_capture_falls_back_to_get_window_state_when_screenshot_dropped(self):

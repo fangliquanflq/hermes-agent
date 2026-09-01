@@ -62,9 +62,10 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                 "description": (
                     "Which action to perform. `capture` is free (no side "
                     "effects). All other actions require approval unless "
-                    "auto-approved. Use `set_value` for select/popup elements "
-                    "and sliders — it selects the matching option directly "
-                    "without opening the native menu (no focus steal)."
+                    "auto-approved. Use `set_value` for select/popup elements, "
+                    "sliders, AXTextArea, and contenteditable fields — it "
+                    "writes the value directly without synthesizing keystrokes "
+                    "or opening a native menu (no focus steal)."
                 ),
             },
             # ── capture ────────────────────────────────────────────
@@ -110,9 +111,10 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
             "element": {
                 "type": "integer",
                 "description": (
-                    "The 1-based SOM index returned by the last "
-                    "`capture(mode='som')` call. Strongly preferred over "
-                    "raw coordinates."
+                    "The 0-based SOM index returned by the last "
+                    "`capture(mode='som')` call. Use the number exactly as "
+                    "reported; do not adjust it. Strongly preferred over raw "
+                    "coordinates."
                 ),
             },
             "coordinate": {
@@ -174,6 +176,7 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "For action='set_value': the value to set on the element. "
+                    "This replaces the element's complete value. "
                     "For AXPopUpButton / select dropdowns, pass the option's "
                     "display label (e.g. 'Blue'). For sliders and other "
                     "AXValue-settable elements, pass the numeric or string value."
@@ -182,7 +185,11 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
             # ── type / key / wait ──────────────────────────────────
             "text": {
                 "type": "string",
-                "description": "Text to type (respects the current layout).",
+                "description": (
+                    "Text to type via synthesized keystrokes (respects the "
+                    "current layout and appends at the current caret). Use "
+                    "`set_value` when the complete value should be replaced."
+                ),
             },
             "keys": {
                 "type": "string",

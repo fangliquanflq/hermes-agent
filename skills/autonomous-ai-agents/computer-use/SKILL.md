@@ -44,11 +44,14 @@ Returns a screenshot with numbered overlays on every interactable
 element AND an AX-tree index like:
 
 ```
-#1  AXButton 'Back' @ (12, 80, 28, 28) [Chrome]
-#2  AXTextField 'Address bar' @ (80, 80, 900, 32) [Chrome]
-#7  Link 'Sign In' @ (900, 420, 80, 24) [Chrome]
+#0  AXButton 'Back' @ (12, 80, 28, 28) [Chrome]
+#1  AXTextField 'Address bar' @ (80, 80, 900, 32) [Chrome]
+#6  Link 'Sign In' @ (900, 420, 80, 24) [Chrome]
 ...
 ```
+
+SOM indices are 0-based. Use the number exactly as capture printed it;
+never add or subtract one.
 
 The role names match the host platform's accessibility framework
 (`AXButton` on macOS, `Button` on Windows UIA, `push button` on Linux
@@ -58,7 +61,7 @@ AT-SPI) — treat them as labels, not as strict types.
 habit:
 
 ```
-computer_use(action="click", element=7)
+computer_use(action="click", element=6)
 ```
 
 Much more reliable than pixel coordinates for every model. Claude was
@@ -68,7 +71,7 @@ trained on both; other models are often only reliable with indices.
 can save a round-trip by asking for the post-action capture inline:
 
 ```
-computer_use(action="click", element=7, capture_after=True)
+computer_use(action="click", element=6, capture_after=True)
 ```
 
 ## Capture modes
@@ -90,6 +93,7 @@ middle_click      element=N     OR     coordinate=[x, y]
 drag              from_element=N, to_element=M        (or from/to_coordinate)
 scroll            direction=up|down|left|right   amount=3 (ticks)
 type              text="…"
+set_value         element=N  value="…"
 key               keys="<save shortcut>" | "return" | "escape" | "<modifier>+t"
 wait              seconds=0.5
 list_apps
@@ -97,8 +101,16 @@ focus_app         app="<app name>"   raise_window=false   (default: don't raise)
 ```
 
 All actions accept optional `capture_after=True` to get a follow-up
-screenshot in the same tool call. All actions that target an element
+screenshot in the same tool call. Pointer actions that target an element
 accept `modifiers=[…]` for held keys.
+
+Use `set_value` for select/popup elements, sliders, `AXTextArea`, and
+`contenteditable` fields. It replaces the element's complete value directly;
+`type` synthesizes keystrokes and appends at the current caret. Direct value
+replacement avoids `same_pid_keyboard_ambiguity` when a process owns multiple
+windows. After an `unverifiable` result, inspect fresh state first; if the
+replacement did not land, reissuing the same `set_value` does not duplicate
+text.
 
 The input actions (`click`, `double_click`, `right_click`, `middle_click`,
 `drag`, `scroll`, `type`, `key`) also accept `delivery_mode`. The optional
