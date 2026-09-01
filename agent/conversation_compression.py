@@ -3028,6 +3028,8 @@ def _pending_steer_user_anchor(messages: list) -> Optional[dict]:
     """Return the newest steer that has not crossed an assistant boundary."""
     from agent.prompt_builder import STEER_MARKER_CLOSE, STEER_MARKER_OPEN
 
+    marker_prefix = f"\n\n{STEER_MARKER_OPEN}\n"
+
     for message in reversed(messages):
         if not isinstance(message, dict):
             continue
@@ -3038,11 +3040,11 @@ def _pending_steer_user_anchor(messages: list) -> Optional[dict]:
         text = _message_text(message).rstrip()
         if not text.endswith(STEER_MARKER_CLOSE):
             continue
-        marker_start = text.rfind(STEER_MARKER_OPEN)
+        marker_start = text.rfind(marker_prefix)
         if marker_start == -1:
             continue
         steer_text = text[
-            marker_start + len(STEER_MARKER_OPEN) : -len(STEER_MARKER_CLOSE)
+            marker_start + len(marker_prefix) : -len(STEER_MARKER_CLOSE)
         ].strip()
         if steer_text:
             return {"role": "user", "content": steer_text}

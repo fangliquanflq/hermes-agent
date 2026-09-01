@@ -20,7 +20,7 @@ from agent.conversation_compression import (
     _ensure_compressed_has_user_turn,
     compress_context,
 )
-from agent.prompt_builder import format_steer_marker
+from agent.prompt_builder import STEER_MARKER_OPEN, format_steer_marker
 from hermes_state import SessionDB
 from tools.process_registry import format_process_notification
 from tools.todo_tool import TODO_INJECTION_HEADER
@@ -270,6 +270,26 @@ def test_busy_steer_replaces_historical_user_anchor_after_compression():
         "historical deployment" not in str(message.get("content"))
         for message in compressed
     )
+
+
+def test_busy_steer_preserves_quoted_open_marker_after_compression():
+    steer = f"Explain this literal marker: {STEER_MARKER_OPEN} and keep the prefix"
+    original = [
+        {"role": "user", "content": "Historical request."},
+        {"role": "assistant", "content": "Working on it."},
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "tool output" + format_steer_marker(steer),
+        },
+    ]
+    compressed = [{"role": "assistant", "content": "Compression summary."}]
+
+    outcome = _ensure_compressed_has_user_turn(original, compressed)
+
+    assert outcome == "steer_inserted"
+    user_turns = [message for message in compressed if message.get("role") == "user"]
+    assert [message["content"] for message in user_turns] == [steer]
 
 
 @pytest.mark.parametrize(
