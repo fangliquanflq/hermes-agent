@@ -3026,9 +3026,15 @@ def _insert_real_user_anchor(messages: list, anchor: dict) -> CompressedUserTurn
 
 def _pending_steer_user_anchor(messages: list) -> Optional[dict]:
     """Return the newest steer that has not crossed an assistant boundary."""
-    from agent.prompt_builder import STEER_MARKER_CLOSE, STEER_MARKER_OPEN
+    from agent.prompt_builder import (
+        STEER_LENGTH_PREFIX,
+        STEER_MARKER_CLOSE,
+        STEER_MARKER_OPEN,
+    )
 
     marker_prefix = f"\n\n{STEER_MARKER_OPEN}\n"
+    length_prefix = f"\n{STEER_LENGTH_PREFIX}"
+    marker_suffix = f"]\n{STEER_MARKER_CLOSE}"
 
     for message in reversed(messages):
         if not isinstance(message, dict):
@@ -3038,14 +3044,22 @@ def _pending_steer_user_anchor(messages: list) -> Optional[dict]:
         if message.get("role") != "tool":
             continue
         text = _message_text(message).rstrip()
-        if not text.endswith(STEER_MARKER_CLOSE):
+        if not text.endswith(marker_suffix):
             continue
-        marker_start = text.rfind(marker_prefix)
-        if marker_start == -1:
+        length_start = text.rfind(length_prefix)
+        if length_start == -1:
             continue
-        steer_text = text[
-            marker_start + len(marker_prefix) : -len(STEER_MARKER_CLOSE)
-        ].strip()
+        length_text = text[
+            length_start + len(length_prefix) : -len(marker_suffix)
+        ]
+        if not length_text.isdecimal():
+            continue
+        steer_length = int(length_text)
+        steer_start = length_start - steer_length
+        marker_start = steer_start - len(marker_prefix)
+        if marker_start < 0 or text[marker_start:steer_start] != marker_prefix:
+            continue
+        steer_text = text[steer_start:length_start]
         if steer_text:
             return {"role": "user", "content": steer_text}
     return None

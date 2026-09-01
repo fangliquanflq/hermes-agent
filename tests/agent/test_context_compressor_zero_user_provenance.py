@@ -273,7 +273,7 @@ def test_busy_steer_replaces_historical_user_anchor_after_compression():
 
 
 def test_busy_steer_preserves_quoted_open_marker_after_compression():
-    steer = f"Explain this literal marker: {STEER_MARKER_OPEN} and keep the prefix"
+    steer = f"prefix\n\n{STEER_MARKER_OPEN}\nquoted payload suffix"
     original = [
         {"role": "user", "content": "Historical request."},
         {"role": "assistant", "content": "Working on it."},
