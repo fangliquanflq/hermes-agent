@@ -217,6 +217,36 @@ def _runner_parts(command):
     return parts[marker + 1], parts[marker + 2], parts[marker + 3 :]
 
 
+@pytest.mark.parametrize(
+    ("target", "peers"),
+    [
+        ("researcher", ()),
+        ("spark", ("spark",)),
+    ],
+)
+def test_delivery_resolves_hermes_beside_running_interpreter(
+    tmp_path, monkeypatch, target, peers
+):
+    """Host-local runners must not depend on their isolated PATH."""
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    sibling = bin_dir / ("hermes.exe" if sys.platform == "win32" else "hermes")
+    sibling.touch()
+    monkeypatch.setattr(bot_mode_dm.sys, "executable", str(bin_dir / "python"))
+
+    calls = _capture_spawn(monkeypatch)
+    home = _managed_home(tmp_path, teammates=("researcher",), peers=peers)
+    agent = _FakeAgent(home, title="Bot Chat")
+
+    result = json.loads(
+        bot_mode_dm.message_agent_tool(target=target, message="ping", agent=agent)
+    )
+
+    assert result["status"] == "sent"
+    _mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
+    assert Path(transport_argv[0]) == sibling
+
+
 def test_local_delivery_command_and_ack(tmp_path, monkeypatch):
     calls = _capture_spawn(monkeypatch)
     home = _managed_home(tmp_path, teammates=("researcher",))
@@ -246,8 +276,8 @@ def test_local_delivery_command_and_ack(tmp_path, monkeypatch):
     command = call["command"]
     mode, dm_file, transport_argv = _runner_parts(command)
     assert mode == "query-file"
-    assert transport_argv == [
-        "hermes",
+    assert Path(transport_argv[0]).name.lower() in ("hermes", "hermes.exe")
+    assert transport_argv[1:] == [
         "-p",
         "researcher",
         "chat",
@@ -294,7 +324,8 @@ def test_peer_delivery_command_pins_registry_profile_for_secondary_bots(
     assert mode == "stdin"
     # The registry the tool validated against is the machine root's — the
     # default profile's home — so the CLI runs there, not in reviewer.
-    assert transport_argv == ["hermes", "-p", "default", "peer", "dm", "spark"]
+    assert Path(transport_argv[0]).name.lower() in ("hermes", "hermes.exe")
+    assert transport_argv[1:] == ["-p", "default", "peer", "dm", "spark"]
 
 
 def test_peer_delivery_command(tmp_path, monkeypatch):
@@ -309,7 +340,14 @@ def test_peer_delivery_command(tmp_path, monkeypatch):
     assert "spark" in result["to"]
     mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
     assert mode == "stdin"
-    assert transport_argv == ["hermes", "-p", "default", "peer", "dm", "spark/researcher"]
+    assert Path(transport_argv[0]).name.lower() in ("hermes", "hermes.exe")
+    assert transport_argv[1:] == [
+        "-p",
+        "default",
+        "peer",
+        "dm",
+        "spark/researcher",
+    ]
 
     # bare peer name targets the peer's main agent
     result2 = json.loads(
@@ -318,7 +356,8 @@ def test_peer_delivery_command(tmp_path, monkeypatch):
     assert result2["status"] == "sent"
     mode, _dm_file, transport_argv = _runner_parts(calls[1]["command"])
     assert mode == "stdin"
-    assert transport_argv == ["hermes", "-p", "default", "peer", "dm", "spark"]
+    assert Path(transport_argv[0]).name.lower() in ("hermes", "hermes.exe")
+    assert transport_argv[1:] == ["-p", "default", "peer", "dm", "spark"]
 
 
 def test_named_profile_sender_prefix(tmp_path, monkeypatch):

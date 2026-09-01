@@ -46,6 +46,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -224,6 +225,17 @@ def _resolve_local_name(target: str, roster: list[str]) -> Optional[str]:
     return None
 
 
+def _hermes_cli() -> str:
+    """Resolve the Hermes CLI without relying on the delivery runner's PATH."""
+    executable = Path(sys.executable or "")
+    sibling = executable.parent / (
+        "hermes.exe" if sys.platform == "win32" else "hermes"
+    )
+    if sibling.is_file():
+        return str(sibling)
+    return shutil.which("hermes") or "hermes"
+
+
 # ── the tool ─────────────────────────────────────────────────────────────────
 
 
@@ -313,7 +325,7 @@ def message_agent_tool(
         # local-teammate path's `-p <resolved>` pin below.
         return _start_delivery(
             [
-                "hermes",
+                _hermes_cli(),
                 "-p",
                 _self_profile_name(root),
                 "peer",
@@ -361,7 +373,7 @@ def message_agent_tool(
 
     return _start_delivery(
         [
-            "hermes",
+            _hermes_cli(),
             "-p",
             resolved,
             "chat",
