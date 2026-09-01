@@ -1668,6 +1668,43 @@ def test_extra_args_set_shm_size_helper():
     assert docker_env._extra_args_set_shm_size([42, None, "--shm-size=1g"]) is True
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--network=bridge"],
+        ["--network", "bridge"],
+        ["--net=bridge"],
+        ["--net", "bridge"],
+    ],
+)
+def test_network_lockdown_skips_implicit_flag_when_extra_args_set_network(
+    monkeypatch, extra,
+):
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(network=False, extra_args=list(extra))
+
+    run_args = _shm_run_args(calls)
+    network_args = [
+        arg for arg in run_args
+        if arg in {"--network", "--net"}
+        or arg.startswith(("--network=", "--net="))
+    ]
+    assert network_args == [extra[0]]
+    assert "--network=none" not in run_args
+
+
+def test_network_lockdown_keeps_implicit_flag_without_explicit_network(monkeypatch):
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(network=False, extra_args=["--user", "1009:1009"])
+
+    run_args = _shm_run_args(calls)
+    assert run_args.count("--network=none") == 1
+
+
 # ── issue #96268: secrets must never appear in docker argv ────────────
 
 

@@ -395,6 +395,7 @@ _DEFAULT_PIDS_LIMIT = "256"
 # (or "0") omits the flag and falls back to Docker's 64 MB default.
 # Ported from nanocoai/nanoclaw#2748.
 _DEFAULT_SHM_SIZE = "1g"
+_DOCKER_NETWORK_FLAGS = frozenset({"--network", "--net"})
 
 
 def _extra_args_set_shm_size(extra_args: list) -> bool:
@@ -406,6 +407,18 @@ def _extra_args_set_shm_size(extra_args: list) -> bool:
     return any(
         isinstance(a, str) and (a == "--shm-size" or a.startswith("--shm-size="))
         for a in (extra_args or [])
+    )
+
+
+def _extra_args_set_network(extra_args: list) -> bool:
+    """True when docker_extra_args explicitly select a network mode."""
+    return any(
+        isinstance(arg, str)
+        and (
+            arg in _DOCKER_NETWORK_FLAGS
+            or any(arg.startswith(f"{flag}=") for flag in _DOCKER_NETWORK_FLAGS)
+        )
+        for arg in (extra_args or [])
     )
 
 # /run is split out from _BASE_SECURITY_ARGS because s6-overlay images need it
@@ -639,7 +652,6 @@ def _extra_args_egress_collisions(
     """Return docker_extra_args entries that can override egress controls."""
     collisions: list[str] = []
     env_flags = {"-e", "--env", "--env-file"}
-    network_flags = {"--network", "--net"}
     i = 0
     while i < len(extra_args):
         arg = extra_args[i]
@@ -660,7 +672,9 @@ def _extra_args_egress_collisions(
                 name = arg.split("=", 1)[1].split("=", 1)[0]
                 if name in critical_names:
                     collisions.append(name)
-        elif arg in network_flags or any(arg.startswith(f"{flag}=") for flag in network_flags):
+        elif arg in _DOCKER_NETWORK_FLAGS or any(
+            arg.startswith(f"{flag}=") for flag in _DOCKER_NETWORK_FLAGS
+        ):
             collisions.append(arg)
         i += 1
     return sorted(set(collisions))
@@ -975,7 +989,7 @@ class DockerEnvironment(BaseEnvironment):
                     "Docker storage driver does not support per-container disk limits "
                     "(requires overlay2 on XFS with pquota). Container will run without disk quota."
                 )
-        if not network:
+        if not network and not _extra_args_set_network(extra_args):
             resource_args.append("--network=none")
 
         # Persistent workspace via bind mounts from a configurable host directory
