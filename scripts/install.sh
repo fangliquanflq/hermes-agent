@@ -241,12 +241,60 @@ log_error() {
     echo -e "${RED}✗${NC} $1"
 }
 
+check_bootstrap_utilities() {
+    # The managed uv installer uses awk and sed without checking them itself,
+    # and both uv and the managed Node path need the standard archive/core
+    # utilities below. Minimal distro images can omit some of these commands;
+    # fail before starting a download instead of surfacing a late subprocess
+    # error (or appearing to hang with no actionable explanation).
+    local required=(
+        awk cat chmod curl dirname grep gzip head id ln ls mkdir mktemp mv rm
+        sed sh tar tr uname
+    )
+    local missing=()
+    local utility
+    for utility in "${required[@]}"; do
+        if ! command -v "$utility" >/dev/null 2>&1; then
+            missing+=("$utility")
+        fi
+    done
+
+    if [ "${#missing[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    log_error "Missing required system utilities: ${missing[*]}"
+    log_info "Install the bootstrap utilities, then re-run this installer:"
+    case "$DISTRO" in
+        ubuntu|debian)
+            log_info "  sudo apt-get update && sudo apt-get install -y curl gawk sed grep tar gzip coreutils"
+            ;;
+        fedora|rhel|centos|rocky|alma)
+            log_info "  sudo dnf install -y curl gawk sed grep tar gzip coreutils"
+            ;;
+        arch|manjaro)
+            log_info "  sudo pacman -S --needed curl gawk sed grep tar gzip coreutils"
+            ;;
+        termux)
+            log_info "  pkg install curl gawk sed grep tar gzip coreutils"
+            ;;
+        macos)
+            log_info "  Restore the macOS system utilities or run: xcode-select --install"
+            ;;
+        *)
+            log_info "  Use your system package manager to install: curl awk sed grep tar gzip coreutils"
+            ;;
+    esac
+    return 1
+}
+
 json_escape() {
-    # Enough for short installer status strings; avoids requiring jq during
-    # pre-install bootstrap.
-    printf '%s' "$1" | tr '\n' ' ' | sed \
-        -e 's/\\/\\\\/g' \
-        -e 's/"/\\"/g'
+    # Enough for short installer status strings. Keep this pure Bash so a
+    # missing sed can still be reported in a valid --stage --json result.
+    local value="${1//$'\n'/ }"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
 }
 
 # npm rewrites tracked package-lock.json files non-deterministically during
@@ -1040,15 +1088,19 @@ install_node_line() {
     local node_os="$2"
     local node_arch="$3"
 
-    # Resolve the latest v${node_line}.x.x tarball name from the index page
+    # Resolve the latest v${node_line}.x.x tarball name from the index page.
+    # GNU tar delegates .xz decompression to the external xz binary, which
+    # minimal distro images often omit. Prefer .xz only when xz is actually
+    # available; Node publishes an equivalent .tar.gz archive for this path.
     local index_url="https://nodejs.org/dist/latest-v${node_line}.x/"
-    local tarball_name
-    tarball_name=$(curl -fsSL "$index_url" \
-        | grep -oE "node-v${node_line}\.[0-9]+\.[0-9]+-${node_os}-${node_arch}\.tar\.xz" \
-        | head -1)
+    local tarball_name=""
+    if command -v xz >/dev/null 2>&1; then
+        tarball_name=$(curl -fsSL "$index_url" \
+            | grep -oE "node-v${node_line}\.[0-9]+\.[0-9]+-${node_os}-${node_arch}\.tar\.xz" \
+            | head -1)
+    fi
 
-    # Fallback to .tar.gz if .tar.xz not available
-    if [ -z "$tarball_name" ]; then
+    if [ -z "$tarball_name" ] && command -v gzip >/dev/null 2>&1; then
         tarball_name=$(curl -fsSL "$index_url" \
             | grep -oE "node-v${node_line}\.[0-9]+\.[0-9]+-${node_os}-${node_arch}\.tar\.gz" \
             | head -1)
@@ -1072,9 +1124,17 @@ install_node_line() {
 
     log_info "Extracting to ~/.hermes/node/..."
     if [[ "$tarball_name" == *.tar.xz ]]; then
-        tar xf "$tmp_dir/$tarball_name" -C "$tmp_dir"
+        if ! tar xf "$tmp_dir/$tarball_name" -C "$tmp_dir"; then
+            log_warn "Extraction failed"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
     else
-        tar xzf "$tmp_dir/$tarball_name" -C "$tmp_dir"
+        if ! tar xzf "$tmp_dir/$tarball_name" -C "$tmp_dir"; then
+            log_warn "Extraction failed"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
     fi
 
     local extracted_dir
@@ -3699,6 +3759,7 @@ run_stage_body() {
         prerequisites)
             print_banner
             detect_os
+            check_bootstrap_utilities || return 1
             resolve_install_layout
             install_uv
             check_python
@@ -3710,12 +3771,14 @@ run_stage_body() {
             ;;
         repository)
             detect_os
+            check_bootstrap_utilities || return 1
             resolve_install_layout
             check_git
             clone_repo
             ;;
         venv)
             detect_os
+            check_bootstrap_utilities || return 1
             resolve_install_layout
             require_install_dir
             install_uv
@@ -3724,6 +3787,7 @@ run_stage_body() {
             ;;
         python-deps)
             detect_os
+            check_bootstrap_utilities || return 1
             resolve_install_layout
             require_install_dir
             install_uv
@@ -3732,6 +3796,7 @@ run_stage_body() {
             ;;
         node-deps)
             detect_os
+            check_bootstrap_utilities || return 1
             resolve_install_layout
             require_install_dir
             check_node
@@ -3766,6 +3831,7 @@ run_stage_body() {
             ;;
         desktop)
             detect_os
+            check_bootstrap_utilities || return 1
             resolve_install_layout
             require_install_dir
             # Each stage runs in its own process, so the Hermes-managed Node
@@ -3842,6 +3908,7 @@ main() {
     print_banner
 
     detect_os
+    check_bootstrap_utilities || return 1
     resolve_install_layout
     install_uv
     check_python
