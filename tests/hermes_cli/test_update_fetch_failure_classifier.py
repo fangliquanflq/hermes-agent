@@ -7,6 +7,9 @@ classifier must call out rate limiting / outages explicitly, and the raw
 stderr line must always be printed alongside the diagnosis.
 """
 
+import subprocess
+from unittest.mock import call, patch
+
 from hermes_cli import update_cmd
 
 
@@ -17,6 +20,10 @@ RATE_LIMIT_STDERR = (
 CURL_429_STDERR = (
     "fatal: unable to access 'https://github.com/NousResearch/hermes-agent.git/':"
     " The requested URL returned error: 429"
+)
+FAST_ANONYMOUS_401_STDERR = (
+    "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n"
+    "fatal: expected flush after ref listing"
 )
 
 
@@ -58,7 +65,8 @@ class TestClassifyFetchFailure:
             "fatal: could not read Username for 'https://github.com':"
             " terminal prompts disabled"
         )
-        assert "GitHub" in msg and "outage" in msg
+        assert "GitHub" in msg and "HTTP/1.1" in msg
+        assert "outage" not in msg
         assert "check your git credentials" not in msg
 
     def test_auth_failure(self):
@@ -85,6 +93,93 @@ class TestPrintFetchFailure:
         update_cmd._print_fetch_failure("")
         out = capsys.readouterr().out.strip().splitlines()
         assert out == ["✗ Failed to fetch updates from origin."]
+
+
+class TestGitHubFast401Fallback:
+    def test_retries_canonical_public_remote_once_over_http11(self, tmp_path):
+        failed = subprocess.CompletedProcess(
+            ["git", "fetch"], 128, "", FAST_ANONYMOUS_401_STDERR
+        )
+        remote = subprocess.CompletedProcess(
+            ["git", "remote", "get-url", "origin"],
+            0,
+            "https://github.com/NousResearch/hermes-agent.git\n",
+            "",
+        )
+        succeeded = subprocess.CompletedProcess(["git", "fetch"], 0, "", "")
+
+        with patch.object(
+            update_cmd.subprocess, "run", side_effect=[failed, remote, succeeded]
+        ) as run:
+            result = update_cmd._run_git_fetch_with_http11_fallback(
+                ["git"], ["fetch", "origin", "main"], "origin", tmp_path
+            )
+
+        assert result is succeeded
+        common = {
+            "cwd": tmp_path,
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+        assert run.call_args_list == [
+            call(
+                ["git", "fetch", "origin", "main"],
+                **common,
+                **update_cmd._no_prompt_git_kwargs(),
+            ),
+            call(["git", "remote", "get-url", "origin"], **common),
+            call(
+                [
+                    "git",
+                    "-c",
+                    "http.version=HTTP/1.1",
+                    "fetch",
+                    "origin",
+                    "main",
+                ],
+                **common,
+                **update_cmd._no_prompt_git_kwargs(),
+            ),
+        ]
+
+    def test_does_not_retry_noncanonical_remote(self, tmp_path):
+        failed = subprocess.CompletedProcess(
+            ["git", "fetch"], 128, "", FAST_ANONYMOUS_401_STDERR
+        )
+        remote = subprocess.CompletedProcess(
+            ["git", "remote", "get-url", "origin"],
+            0,
+            "https://github.com/example/private-repo.git\n",
+            "",
+        )
+
+        with patch.object(
+            update_cmd.subprocess, "run", side_effect=[failed, remote]
+        ) as run:
+            result = update_cmd._run_git_fetch_with_http11_fallback(
+                ["git"], ["fetch", "origin", "main"], "origin", tmp_path
+            )
+
+        assert result is failed
+        assert run.call_count == 2
+
+    def test_does_not_retry_ordinary_authentication_failure(self, tmp_path):
+        failed = subprocess.CompletedProcess(
+            ["git", "fetch"],
+            128,
+            "",
+            "fatal: Authentication failed for 'https://github.com/example/private.git/'",
+        )
+
+        with patch.object(update_cmd.subprocess, "run", return_value=failed) as run:
+            result = update_cmd._run_git_fetch_with_http11_fallback(
+                ["git"], ["fetch", "origin", "main"], "origin", tmp_path
+            )
+
+        assert result is failed
+        run.assert_called_once()
 
 
 def test_update_network_git_calls_never_prompt_for_credentials():

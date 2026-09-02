@@ -4528,6 +4528,61 @@ def _run_logged_subprocess(cmd, *, cwd=None, env=None):
     _log_only_write(result.stdout or "")
     return result
 
+
+def _run_git_fetch_with_http11_fallback(
+    git_cmd: list[str],
+    fetch_args: list[str],
+    remote: str,
+    cwd: Path,
+) -> subprocess.CompletedProcess:
+    """Run one updater fetch, retrying GitHub's public fast-401 over HTTP/1.1.
+
+    Some datacenter egress IPs receive a 401 only on GitHub's anonymous
+    protocol-v2 HTTP/2 POST, while the same public-repo fetch succeeds over
+    HTTP/1.1. Keep the workaround narrow: the stderr must contain the observed
+    non-interactive prompt signature and the configured remote must be the
+    canonical public Hermes repository. Private forks and ordinary credential
+    failures therefore retain their original result without a downgrade.
+    """
+    run_kwargs = {
+        "cwd": cwd,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    result = subprocess.run(
+        git_cmd + fetch_args,
+        **run_kwargs,
+        **_no_prompt_git_kwargs(),
+    )
+    stderr = result.stderr or ""
+    fast_401 = (
+        result.returncode != 0
+        and "could not read Username for 'https://github.com'" in stderr
+        and "terminal prompts disabled" in stderr
+        and "expected flush after ref listing" in stderr
+    )
+    if not fast_401:
+        return result
+
+    remote_result = subprocess.run(
+        git_cmd + ["remote", "get-url", remote],
+        **run_kwargs,
+    )
+    remote_url = (remote_result.stdout or "").strip().lower().rstrip("/")
+    if remote_result.returncode != 0 or remote_url not in {
+        "https://github.com/nousresearch/hermes-agent",
+        "https://github.com/nousresearch/hermes-agent.git",
+    }:
+        return result
+
+    return subprocess.run(
+        git_cmd + ["-c", "http.version=HTTP/1.1"] + fetch_args,
+        **run_kwargs,
+        **_no_prompt_git_kwargs(),
+    )
+
 def _classify_fetch_failure(stderr: str) -> str:
     """Map git-fetch stderr to a one-line, user-facing diagnosis.
 
@@ -4559,14 +4614,11 @@ def _classify_fetch_failure(stderr: str) -> str:
     if "Could not resolve host" in stderr or "unable to access" in stderr:
         return "✗ Network error — cannot reach the remote repository."
     if "could not read Username" in stderr or "terminal prompts disabled" in stderr:
-        # Anonymous fetch of a public repo got HTTP 401. GitHub does this
-        # during outages (and for renamed/private repos) — it is not a
-        # credentials problem on the user's side.
         return (
-            "✗ GitHub rejected the anonymous fetch (asked for a login) — this"
-            " usually means a GitHub outage; try again in a few minutes"
-            " (https://www.githubstatus.com). If it persists, check"
-            " `git remote -v` points at a public repo."
+            "✗ GitHub rejected the anonymous fetch (asked for a login). If the"
+            " repo is public, try `git config --global"
+            " http.https://github.com.version HTTP/1.1`; otherwise check the"
+            " remote's credentials and visibility."
         )
     if "Authentication failed" in stderr:
         return "✗ Authentication failed — check your git credentials or SSH key."
@@ -4670,12 +4722,11 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
         fetch_result = None
         if has_upstream_remote:
             print("→ Fetching from upstream...")
-            fetch_result = subprocess.run(
-                git_cmd + ["fetch"] + depth_args + ["upstream", branch],
-                cwd=_m().PROJECT_ROOT,
-                capture_output=True,
-                text=True, encoding="utf-8", errors="replace",
-                **_no_prompt_git_kwargs(),
+            fetch_result = _run_git_fetch_with_http11_fallback(
+                git_cmd,
+                ["fetch"] + depth_args + ["upstream", branch],
+                "upstream",
+                _m().PROJECT_ROOT,
             )
         if fetch_result is not None and fetch_result.returncode == 0:
             upstream_exists = True
@@ -4683,24 +4734,22 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
         else:
             # No upstream remote, or the upstream fetch failed — use origin.
             print("→ Fetching from origin...")
-            fetch_result = subprocess.run(
-                git_cmd + ["fetch"] + depth_args + ["origin", branch],
-                cwd=_m().PROJECT_ROOT,
-                capture_output=True,
-                text=True, encoding="utf-8", errors="replace",
-                **_no_prompt_git_kwargs(),
+            fetch_result = _run_git_fetch_with_http11_fallback(
+                git_cmd,
+                ["fetch"] + depth_args + ["origin", branch],
+                "origin",
+                _m().PROJECT_ROOT,
             )
             upstream_exists = False
             compare_branch = f"origin/{branch}"
     else:
         # Non-default branch: compare against origin/<branch> directly.
         print("→ Fetching from origin...")
-        fetch_result = subprocess.run(
-            git_cmd + ["fetch"] + depth_args + ["origin", branch],
-            cwd=_m().PROJECT_ROOT,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            **_no_prompt_git_kwargs(),
+        fetch_result = _run_git_fetch_with_http11_fallback(
+            git_cmd,
+            ["fetch"] + depth_args + ["origin", branch],
+            "origin",
+            _m().PROJECT_ROOT,
         )
         upstream_exists = False
         compare_branch = f"origin/{branch}"
@@ -8618,12 +8667,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _m()._warn_orphaned_update_autostashes(git_cmd, _m().PROJECT_ROOT)
 
         print("→ Fetching updates...")
-        fetch_result = subprocess.run(
-            git_cmd + ["fetch", "origin", branch],
-            cwd=_m().PROJECT_ROOT,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            **_no_prompt_git_kwargs(),
+        fetch_result = _run_git_fetch_with_http11_fallback(
+            git_cmd,
+            ["fetch", "origin", branch],
+            "origin",
+            _m().PROJECT_ROOT,
         )
         if fetch_result.returncode != 0:
             _print_fetch_failure(fetch_result.stderr)
