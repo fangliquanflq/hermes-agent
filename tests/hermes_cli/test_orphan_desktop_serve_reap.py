@@ -27,6 +27,9 @@ def test_desktop_local_serve_shape_matches_ephemeral_loopback():
     assert _is_desktop_local_serve_cmdline(
         "/venv/bin/hermes serve --host=127.0.0.1 --port=0"
     )
+    assert _is_desktop_local_serve_cmdline(
+        "python -m hermes_cli.main dashboard --no-open --host 127.0.0.1 --port 0"
+    )
 
 
 def test_desktop_local_serve_shape_spares_fixed_port_and_non_serve():
@@ -35,6 +38,9 @@ def test_desktop_local_serve_shape_spares_fixed_port_and_non_serve():
     )
     assert not _is_desktop_local_serve_cmdline(
         "hermes serve --host 127.0.0.1 --port 9119"
+    )
+    assert not _is_desktop_local_serve_cmdline(
+        "hermes dashboard --host 127.0.0.1 --port 0"
     )
     assert not _is_desktop_local_serve_cmdline("hermes gateway run --replace")
     assert not _is_desktop_local_serve_cmdline(
@@ -48,10 +54,14 @@ def test_reap_only_kills_ppid1_local_serves():
         (222, "hermes serve --host 127.0.0.1 --port 0"),  # still has parent
         (333, "hermes serve --host 100.1.2.3 --port 9119"),  # fixed remote
         (444, "hermes serve --isolated --host 127.0.0.1 --port 0"),  # orphan isolated
+        (
+            555,
+            "hermes dashboard --no-open --host 127.0.0.1 --port 0",
+        ),  # orphan legacy Desktop fallback
     ]
-    ppids = {111: 1, 222: 50, 333: 1, 444: 1}
+    ppids = {111: 1, 222: 50, 333: 1, 444: 1, 555: 1}
     terms: list[int] = []
-    live = {111, 222, 333, 444}
+    live = {111, 222, 333, 444, 555}
 
     def fake_kill(pid, sig):
         if sig == 0:
@@ -87,9 +97,9 @@ def test_reap_only_kills_ppid1_local_serves():
             process_age_seconds_fn=lambda _pid: 600.0,
         )
 
-    assert set(result["matched"]) == {111, 444}
-    assert set(terms) == {111, 444}
-    assert set(result["killed"]) == {111, 444}
+    assert set(result["matched"]) == {111, 444, 555}
+    assert set(terms) == {111, 444, 555}
+    assert set(result["killed"]) == {111, 444, 555}
     assert 222 not in terms
     assert 333 not in terms
 

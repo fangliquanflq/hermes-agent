@@ -740,19 +740,26 @@ def _detect_concurrent_hermes_instances(
 
 
 def _is_desktop_local_serve_cmdline(command: str) -> bool:
-    """True for the Desktop-local serve spawn shape (loopback + ephemeral port).
+    """True for a Desktop-local backend spawn (loopback + ephemeral port).
 
     Desktop primary/pool backends launch as::
 
         hermes serve --host 127.0.0.1 --port 0
         hermes serve --isolated --host 127.0.0.1 --port 0 ...
 
+    Older runtimes without the ``serve`` command use the compatibility shape::
+
+        hermes dashboard --no-open --host 127.0.0.1 --port 0
+
     Intentional long-lived headless serves (e.g. ``--host <tailscale-ip>
     --port 9119``) must never match — those are operator-managed remote
     backends and may legitimately run with ppid 1 under launchd/nohup.
     """
     cmd = command.lower()
-    if "serve" not in cmd:
+    is_headless_backend = "serve" in cmd or (
+        "dashboard" in cmd and "--no-open" in cmd
+    )
+    if not is_headless_backend:
         return False
     if "hermes" not in cmd and "hermes_cli" not in cmd:
         return False
@@ -963,13 +970,14 @@ def _reap_orphaned_desktop_local_serves(
     lock_owned_pids_fn=None,
     process_age_seconds_fn=None,
 ) -> dict[str, list]:
-    """Kill leftover Desktop-local ``hermes serve`` backends with no parent.
+    """Kill leftover Desktop-local backends with no parent.
 
     When Electron dies uncleanly (crash / SIGKILL / update handoff), local
-    ``serve --host 127.0.0.1 --port 0`` children can be reparented to pid 1 and
-    keep their full MCP trees alive. The next Desktop boot then stacks a fresh
-    backend on top of the corpses until the machine hits EMFILE and the UI
-    loses tabs/sidebar.
+    ``serve --host 127.0.0.1 --port 0`` children (or the legacy
+    ``dashboard --no-open`` fallback) can be reparented to pid 1 and keep their
+    full MCP trees alive. The next Desktop boot then stacks a fresh backend on
+    top of the corpses until the machine hits EMFILE and the UI loses
+    tabs/sidebar.
 
     The parent-death watchdog prevents *future* orphans once a backend is
     running under HERMES_PARENT_PID; this helper clears *already* orphaned
