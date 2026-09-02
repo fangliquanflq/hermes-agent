@@ -342,6 +342,21 @@ class TestRemoveFile:
 
 
 class TestSkillManageDispatcher:
+    def test_create_with_file_content_points_to_content(self, tmp_path):
+        with _skill_dir(tmp_path):
+            raw = skill_manage(
+                action="create",
+                name="test-skill",
+                file_content=VALID_SKILL_CONTENT,
+            )
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert result["error"] == (
+            "'file_content' is only valid for action='write_file'; "
+            "for action='create', pass the full SKILL.md as 'content'."
+        )
+
     def test_full_create_via_dispatcher(self, tmp_path):
         """Foreground create does NOT mark the skill as agent-created.
 

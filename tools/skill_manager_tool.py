@@ -1627,6 +1627,12 @@ def skill_manage(
 
     if action == "create":
         if not content:
+            if file_content is not None:
+                return tool_error(
+                    "'file_content' is only valid for action='write_file'; "
+                    "for action='create', pass the full SKILL.md as 'content'.",
+                    success=False,
+                )
             return tool_error("content is required for 'create'. Provide the full SKILL.md text (frontmatter + body).", success=False)
         result = _create_skill(name, content, category)
 
@@ -1793,7 +1799,7 @@ SKILL_MANAGE_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Full SKILL.md content (YAML frontmatter + markdown body). "
-                    "Required for 'create'; on 'patch' it performs a full "
+                    "Required for 'create' (do not use file_content); on 'patch' it performs a full "
                     "rewrite (major overhauls only — read the skill first with "
                     "skill_view(), and don't combine with old_string)."
                 )
@@ -1836,7 +1842,10 @@ SKILL_MANAGE_SCHEMA = {
             },
             "file_content": {
                 "type": "string",
-                "description": "Content for the file. Required for 'write_file'."
+                "description": (
+                    "Content for a supporting file. Only valid for 'write_file'; "
+                    "for 'create', pass the full SKILL.md as content instead."
+                )
             },
             # NOTE: the handler also accepts `absorbed_into` on delete — the
             # curator's consolidation pass declares merge-vs-prune intent with
