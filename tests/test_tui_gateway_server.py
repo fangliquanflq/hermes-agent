@@ -4973,6 +4973,90 @@ def test_ws_orphan_reap_defers_running_turn_for_active_delegation(monkeypatch):
         server._sessions.pop("delegating-turn", None)
 
 
+def test_ws_orphan_reap_defers_running_turn_for_pending_clarify(monkeypatch):
+    callbacks = []
+    interrupted = []
+
+    class _Timer:
+        def __init__(self, _delay, callback):
+            callbacks.append(callback)
+
+        def start(self):
+            return None
+
+    class _LiveThread:
+        def is_alive(self):
+            return True
+
+    def _interrupt():
+        interrupted.append("interrupted")
+        session["running"] = False
+
+    session = _session(
+        agent=types.SimpleNamespace(interrupt=_interrupt),
+        transport=server._detached_ws_transport,
+        running=True,
+        _run_thread=_LiveThread(),
+    )
+    server._sessions["clarify-turn"] = session
+    answer = {}
+    block_thread = threading.Thread(
+        target=lambda: answer.setdefault(
+            "value",
+            server._block(
+                "clarify.request",
+                "clarify-turn",
+                {"question": "Continue?"},
+                timeout=5,
+            ),
+        ),
+        daemon=True,
+    )
+    block_thread.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        with server._prompt_lock:
+            request_ids = [
+                request_id
+                for request_id, (owner_sid, _event) in server._pending.items()
+                if owner_sid == "clarify-turn"
+            ]
+        if request_ids:
+            break
+        time.sleep(0.01)
+    assert request_ids
+    request_id = request_ids[0]
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0.01)
+    monkeypatch.setattr(server.threading, "Timer", _Timer)
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+
+    try:
+        server._schedule_ws_orphan_reap("clarify-turn")
+        callbacks.pop(0)()
+
+        assert interrupted == []
+        assert len(callbacks) == 1
+
+        response = server.handle_request(
+            {
+                "id": "answer-after-reconnect",
+                "method": "clarify.respond",
+                "params": {"request_id": request_id, "answer": "yes"},
+            }
+        )
+        block_thread.join(timeout=2)
+        assert response["result"] == {"status": "ok"}
+        assert answer == {"value": "yes"}
+
+        callbacks.pop(0)()
+
+        assert interrupted == ["interrupted"]
+        assert len(callbacks) == 1
+    finally:
+        block_thread.join(timeout=2)
+        server._sessions.pop("clarify-turn", None)
+
+
 def test_ws_orphan_reap_interrupts_in_process_turn(monkeypatch):
     callbacks = []
     interrupted = []

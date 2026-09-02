@@ -1490,6 +1490,14 @@ def _schedule_ws_orphan_reap(sid: str, *, delay_s: float | None = None) -> None:
                 return
             if _session_has_active_delegations(sid, current):
                 reschedule_delay = _WS_ORPHAN_REAP_GRACE_S
+            elif _session_has_pending_clarify(sid):
+                # A clarify prompt is intentionally parked on user input. Its
+                # own configured timeout owns that wait; treating a transient
+                # transport disconnect as a turn interrupt clears `_pending`
+                # and converts a later click into an empty tool response. Keep
+                # polling until the answer/timeout settles the prompt so a
+                # reconnect can replay and resolve the same request id.
+                reschedule_delay = _WS_ORPHAN_REAP_GRACE_S
             elif current.get("running"):
                 if not current.get(
                     "_client_gone_interrupt_requested"
@@ -3061,6 +3069,16 @@ def _pending_clarify_request_payload(sid: str) -> dict | None:
             if isinstance(pending, dict):
                 return dict(pending)
     return None
+
+
+def _session_has_pending_clarify(sid: str) -> bool:
+    """Whether ``sid`` is parked waiting for an answer to clarify."""
+    with _prompt_lock:
+        return any(
+            owner_sid == sid
+            and _pending_prompt_payloads.get(rid, ("", {}))[0] == "clarify.request"
+            for rid, (owner_sid, _ev) in _pending.items()
+        )
 
 
 def _pending_approval_request_payload(session_key: str) -> dict | None:
