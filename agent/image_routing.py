@@ -543,6 +543,11 @@ def _lookup_supports_vision(
 
     caps = None
     try:
+        catalog_model = model
+        if (provider or "").strip().lower() == "openai-codex":
+            from agent.model_metadata import strip_codex_context_variant_suffix
+
+            catalog_model = strip_codex_context_variant_suffix(model)
         from agent.models_dev import get_model_capabilities
         # allow_network=True on purpose: vision-capability lookup runs when
         # an image actually needs routing (not per turn), and the #31179
@@ -551,7 +556,7 @@ def _lookup_supports_vision(
         # reintroduce the bug. This preserves the historical
         # network-on-cold-cache behavior for this one path; the fetch is
         # cached (4h TTL) and backoff-limited after failures.
-        caps = get_model_capabilities(provider, model, allow_network=True)
+        caps = get_model_capabilities(provider, catalog_model, allow_network=True)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("image_routing: caps lookup failed for %s:%s — %s", provider, model, exc)
     if caps is not None:

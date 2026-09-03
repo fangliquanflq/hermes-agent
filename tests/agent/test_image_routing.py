@@ -64,6 +64,21 @@ class TestDecideImageInputMode:
         with patch("agent.image_routing._lookup_supports_vision", return_value=None):
             assert decide_image_input_mode("openrouter", "brand-new-slug", {}) == "text"
 
+    def test_codex_variant_runtime_identity_is_preserved(self):
+        with patch(
+            "agent.image_routing._lookup_supports_vision", return_value=True
+        ) as mock_lookup:
+            assert (
+                decide_image_input_mode(
+                    "openai-codex", "gpt-5.6-sol-900k", {}
+                )
+                == "native"
+            )
+
+        mock_lookup.assert_called_once_with(
+            "openai-codex", "gpt-5.6-sol-900k", {}
+        )
+
     def test_auto_explicit_aux_backend_is_the_defacto_route(self):
         """Maintainer decision (2026-08-28, reverses #29135): a user who
         NAMED a dedicated vision backend wants it used — even when the
@@ -157,6 +172,35 @@ class TestLookupSupportsVisionOverride:
         fake_caps = type("Caps", (), {"supports_vision": True})()
         with patch("agent.models_dev.get_model_capabilities", return_value=fake_caps):
             assert _lookup_supports_vision("anthropic", "claude-sonnet-4", {}) is True
+
+    def test_codex_900k_variant_uses_base_slug_for_catalog_lookup(self):
+        fake_caps = type("Caps", (), {"supports_vision": True})()
+        with patch(
+            "agent.models_dev.get_model_capabilities", return_value=fake_caps
+        ) as mock_caps:
+            assert (
+                _lookup_supports_vision(
+                    "openai-codex", "gpt-5.6-sol-900k", {}
+                )
+                is True
+            )
+
+        mock_caps.assert_called_once_with(
+            "openai-codex", "gpt-5.6-sol", allow_network=True
+        )
+
+    def test_codex_ineligible_900k_alias_is_not_normalized(self):
+        with patch(
+            "agent.models_dev.get_model_capabilities", return_value=None
+        ) as mock_caps:
+            assert (
+                _lookup_supports_vision("openai-codex", "gpt-5.5-900k", {})
+                is None
+            )
+
+        mock_caps.assert_called_once_with(
+            "openai-codex", "gpt-5.5-900k", allow_network=True
+        )
 
 
     def test_ollama_probe_when_models_dev_missing(self):
