@@ -9857,7 +9857,13 @@ class TelegramAdapter(BasePlatformAdapter):
         user_id = getattr(from_user, "id", None)
         return bot_id is not None and user_id is not None and bot_id == user_id
 
-    def _should_process_message(self, message: Message, *, is_command: bool = False) -> bool:
+    def _should_process_message(
+        self,
+        message: Message,
+        *,
+        is_command: bool = False,
+        allow_captionless_voice_pattern: bool = False,
+    ) -> bool:
         """Apply Telegram group trigger rules.
 
         DMs remain unrestricted. Group/supergroup messages are accepted when:
@@ -9949,7 +9955,15 @@ class TelegramAdapter(BasePlatformAdapter):
         # _message_mentions_bot above — skip the redundant second call.
         if not self._telegram_guest_mode() and self._message_mentions_bot(message):
             return True
-        return self._message_matches_mention_patterns(message)
+        if self._message_matches_mention_patterns(message):
+            return True
+        return bool(
+            allow_captionless_voice_pattern
+            and self._mention_patterns
+            and (getattr(message, "voice", None) or getattr(message, "audio", None))
+            and not getattr(message, "text", None)
+            and not getattr(message, "caption", None)
+        )
 
     async def _ensure_forum_commands(self, message) -> None:
         """Lazy-register bot commands for forum supergroups.
@@ -10285,7 +10299,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 getattr(getattr(update.message, "chat", None), "id", None),
             )
             return
-        if not self._should_process_message(update.message):
+        msg = update.message
+        should_process = self._should_process_message(msg)
+        voice_pattern_gate = (
+            not should_process
+            and self._should_process_message(
+                msg,
+                allow_captionless_voice_pattern=True,
+            )
+        )
+        if not should_process and not voice_pattern_gate:
             if self._should_observe_unmentioned_group_message(update.message):
                 _m = update.message
                 _observe_type = self._media_message_type(_m)
@@ -10297,8 +10320,6 @@ class TelegramAdapter(BasePlatformAdapter):
                     _m, _event.message_type, update_id=update.update_id, event=_event
                 )
             return
-
-        msg = update.message
 
         msg_type = self._media_message_type(msg)
 
@@ -10352,6 +10373,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.warning("[Telegram] Failed to cache photo: %s", _redact_telegram_error_text(e), exc_info=True)
                 await self._surface_media_cache_failure(msg, event, "photo", e)
 
+        voice_gate_result = None
+
         # Download voice/audio messages to cache for STT transcription
         if msg.voice:
             try:
@@ -10367,6 +10390,11 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_urls = [cached_path]
                 event.media_types = ["audio/ogg"]
                 logger.info("[Telegram] Cached user voice at %s", cached_path)
+                if voice_pattern_gate:
+                    voice_gate_result = await self._evaluate_voice_mention_gate(
+                        cached_path,
+                        self._mention_patterns,
+                    )
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache voice: %s", _redact_telegram_error_text(e), exc_info=True)
                 await self._surface_media_cache_failure(msg, event, "voice message", e)
@@ -10384,9 +10412,27 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_urls = [cached_path]
                 event.media_types = ["audio/mp3"]
                 logger.info("[Telegram] Cached user audio at %s", cached_path)
+                if voice_pattern_gate:
+                    voice_gate_result = await self._evaluate_voice_mention_gate(
+                        cached_path,
+                        self._mention_patterns,
+                    )
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache audio: %s", _redact_telegram_error_text(e), exc_info=True)
                 await self._surface_media_cache_failure(msg, event, "audio file", e)
+
+        if voice_pattern_gate:
+            if not voice_gate_result:
+                logger.info("[Telegram] Voice dropped: transcript did not match mention patterns")
+                if self._should_observe_unmentioned_group_message(msg):
+                    self._observe_unmentioned_group_message(
+                        msg,
+                        event.message_type,
+                        update_id=update.update_id,
+                        event=event,
+                    )
+                return
+            self._cache_voice_mention_gate(event, voice_gate_result)
 
         elif msg.video:
             try:

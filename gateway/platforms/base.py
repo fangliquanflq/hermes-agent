@@ -3238,6 +3238,27 @@ class BasePlatformAdapter(ABC):
     # routing is platform-generic instead of Discord-only.
     gateway_runner = None  # type: ignore[assignment]  # set by gateway/run.py
 
+    async def _evaluate_voice_mention_gate(self, audio_path: str, mention_patterns):
+        """Ask the owning runner to transcribe one voice-note wake word."""
+        gate = getattr(
+            getattr(self, "gateway_runner", None),
+            "_transcribe_voice_mention_gate",
+            None,
+        )
+        if not callable(gate):
+            return None
+        try:
+            return await gate(audio_path, mention_patterns)
+        except Exception as exc:
+            logger.warning("Voice mention-gate transcription failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _cache_voice_mention_gate(event: MessageEvent, gate_result) -> None:
+        """Expose an eager gate transcript to all downstream STT paths."""
+        event._gateway_pending_stt_text = gate_result[0]
+        event._gateway_pending_stt_transcripts = list(gate_result[1])
+
     def __init__(self, config: PlatformConfig, platform: Platform):
         self.config = config
         self.platform = platform

@@ -1496,7 +1496,15 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
     async def _build_message_event(self, data: Dict[str, Any]) -> Optional[MessageEvent]:
         """Build a MessageEvent from bridge message data, downloading images to cache."""
         try:
-            if not self._should_process_message(data):
+            should_process = self._should_process_message(data)
+            voice_pattern_gate = (
+                not should_process
+                and self._should_process_message(
+                    data,
+                    allow_captionless_voice_pattern=True,
+                )
+            )
+            if not should_process and not voice_pattern_gate:
                 return None
 
             # Determine message type
@@ -1536,6 +1544,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             raw_urls = data.get("mediaUrls", [])
             cached_urls = []
             media_types = []
+            voice_gate_result = None
             for url in raw_urls:
                 bridge_mime = str(data.get("mime") or "").strip()
                 if msg_type == MessageType.PHOTO and url.startswith(("http://", "https://")):
@@ -1562,6 +1571,11 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                         cached_urls.append(cached_path)
                         media_types.append(bridge_mime or ("audio/ogg" if msg_type == MessageType.VOICE else "audio/mpeg"))
                         print(f"[{self.name}] Cached user audio: {cached_path}", flush=True)
+                        if voice_pattern_gate and voice_gate_result is None:
+                            voice_gate_result = await self._evaluate_voice_mention_gate(
+                                cached_path,
+                                self._mention_patterns,
+                            )
                     except Exception as e:
                         print(f"[{self.name}] Failed to cache audio: {e}", flush=True)
                         cached_urls.append(url)
@@ -1572,6 +1586,11 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                         cached_urls.append(url)
                         media_types.append(bridge_mime or ("audio/ogg" if msg_type == MessageType.VOICE else "audio/mpeg"))
                         print(f"[{self.name}] Using bridge-cached audio: {url}", flush=True)
+                        if voice_pattern_gate and voice_gate_result is None:
+                            voice_gate_result = await self._evaluate_voice_mention_gate(
+                                url,
+                                self._mention_patterns,
+                            )
                     else:
                         print(f"[{self.name}] Rejected bridge audio path outside cache dir: {url}", flush=True)
                 elif msg_type == MessageType.DOCUMENT and os.path.isabs(url):
@@ -1594,6 +1613,13 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 else:
                     cached_urls.append(url)
                     media_types.append("unknown")
+
+            if voice_pattern_gate and not voice_gate_result:
+                print(
+                    f"[{self.name}] Voice dropped: transcript did not match mention patterns",
+                    flush=True,
+                )
+                return None
 
             # For text-readable documents, inject file content directly into
             # the message text so the agent can read it inline.
@@ -1677,7 +1703,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 if not body.startswith(_OWNER_REPLY_PREFIX):
                     body = f"{_OWNER_REPLY_PREFIX}{body}"
 
-            return MessageEvent(
+            event = MessageEvent(
                 text=body,
                 message_type=msg_type,
                 source=source,
@@ -1691,6 +1717,9 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 reply_to_author_id=reply_to_author_id,
                 reply_to_is_own_message=reply_to_is_own_message,
             )
+            if voice_gate_result:
+                self._cache_voice_mention_gate(event, voice_gate_result)
+            return event
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")
             return None

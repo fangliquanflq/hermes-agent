@@ -1,4 +1,6 @@
+import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from gateway.config import Platform, PlatformConfig, load_gateway_config
@@ -95,6 +97,120 @@ def test_regex_mention_patterns_allow_custom_wake_words():
     assert adapter._should_process_message(_group_message("chompy status")) is True
     assert adapter._should_process_message(_group_message("   chompy help")) is True
     assert adapter._should_process_message(_group_message("hey chompy")) is False
+
+
+def test_captionless_ptt_can_satisfy_mention_pattern_before_dispatch(monkeypatch):
+    async def _run():
+        adapter = _make_adapter(
+            require_mention=True,
+            mention_patterns=[r"\bhermes\b"],
+            group_policy="open",
+        )
+        adapter.gateway_runner = SimpleNamespace(
+            _transcribe_voice_mention_gate=AsyncMock(
+                return_value=('"hermes status"', ["hermes status"]),
+            )
+        )
+        cache_audio = AsyncMock(return_value="C:/cache/voice.ogg")
+        monkeypatch.setattr(
+            "plugins.platforms.whatsapp.adapter.cache_audio_from_url",
+            cache_audio,
+        )
+        data = _group_message(
+            "[ptt received]",
+            hasMedia=True,
+            mediaType="ptt",
+            mediaUrls=["https://bridge.invalid/voice.ogg"],
+            mime="audio/ogg",
+            senderId="15551239999@s.whatsapp.net",
+            senderName="Alice",
+            chatName="Test Group",
+            messageId="message-1",
+        )
+
+        event = await adapter._build_message_event(data)
+
+        assert event is not None
+        assert event.text == ""
+        assert event.media_urls == ["C:/cache/voice.ogg"]
+        assert event._gateway_pending_stt_text == '"hermes status"'
+        assert event._gateway_pending_stt_transcripts == ["hermes status"]
+        cache_audio.assert_awaited_once_with(
+            "https://bridge.invalid/voice.ogg",
+            ext=".ogg",
+        )
+        adapter.gateway_runner._transcribe_voice_mention_gate.assert_awaited_once_with(
+            "C:/cache/voice.ogg",
+            adapter._mention_patterns,
+        )
+
+    asyncio.run(_run())
+
+
+def test_captionless_ptt_without_wake_word_is_transcribed_once_and_dropped(monkeypatch):
+    async def _run():
+        adapter = _make_adapter(
+            require_mention=True,
+            mention_patterns=[r"\bhermes\b"],
+            group_policy="open",
+        )
+        gate = AsyncMock(return_value=None)
+        adapter.gateway_runner = SimpleNamespace(_transcribe_voice_mention_gate=gate)
+        cache_audio = AsyncMock(return_value="C:/cache/voice.ogg")
+        monkeypatch.setattr(
+            "plugins.platforms.whatsapp.adapter.cache_audio_from_url",
+            cache_audio,
+        )
+
+        event = await adapter._build_message_event(
+            _group_message(
+                "[ptt received]",
+                hasMedia=True,
+                mediaType="ptt",
+                mediaUrls=["https://bridge.invalid/voice.ogg"],
+                senderId="15551239999@s.whatsapp.net",
+            )
+        )
+
+        assert event is None
+        cache_audio.assert_awaited_once()
+        gate.assert_awaited_once()
+
+    asyncio.run(_run())
+
+
+def test_reply_to_bot_ptt_bypasses_eager_mention_transcription(monkeypatch):
+    async def _run():
+        adapter = _make_adapter(
+            require_mention=True,
+            mention_patterns=[r"\bhermes\b"],
+            group_policy="open",
+        )
+        gate = AsyncMock()
+        adapter.gateway_runner = SimpleNamespace(_transcribe_voice_mention_gate=gate)
+        cache_audio = AsyncMock(return_value="C:/cache/voice.ogg")
+        monkeypatch.setattr(
+            "plugins.platforms.whatsapp.adapter.cache_audio_from_url",
+            cache_audio,
+        )
+
+        event = await adapter._build_message_event(
+            _group_message(
+                "[ptt received]",
+                hasMedia=True,
+                mediaType="ptt",
+                mediaUrls=["https://bridge.invalid/voice.ogg"],
+                quotedParticipant="15551230000@lid",
+                hasQuotedMessage=True,
+                senderId="15551239999@s.whatsapp.net",
+            )
+        )
+
+        assert event is not None
+        cache_audio.assert_awaited_once()
+        gate.assert_not_awaited()
+
+    asyncio.run(_run())
 
 
 def test_invalid_regex_patterns_are_ignored():

@@ -1,4 +1,5 @@
 import asyncio
+import re
 import sys
 import threading
 import types
@@ -169,6 +170,88 @@ async def test_pending_voice_interrupt_reuses_transcript_and_echo():
         '🎙️ "hello once"',
         metadata=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_voice_mention_gate_transcript_is_reused_by_main_preparation():
+    adapter = SimpleNamespace(send=AsyncMock())
+    runner = _runner(adapter)
+    runner._should_echo_stt_transcripts = lambda: True
+    source = _source()
+    event = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=source,
+        media_urls=["/tmp/telegram-voice.ogg"],
+        media_types=["audio/ogg"],
+    )
+
+    with patch(
+        "tools.transcription_tools.transcribe_audio",
+        return_value={"success": True, "transcript": "hello hermes", "provider": "mock"},
+    ) as mock_transcribe:
+        gate_result = await runner._transcribe_voice_mention_gate(
+            event.media_urls[0],
+            [re.compile(r"\bhermes\b")],
+        )
+
+        assert gate_result == ('"hello hermes"', ["hello hermes"])
+        event._gateway_pending_stt_text = gate_result[0]
+        event._gateway_pending_stt_transcripts = gate_result[1]
+        runner._enrich_message_with_transcription = AsyncMock()
+
+        prepared = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+        prepared_again = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert prepared == '"hello hermes"'
+    assert prepared_again == prepared
+    mock_transcribe.assert_called_once_with("/tmp/telegram-voice.ogg", None, "gateway")
+    runner._enrich_message_with_transcription.assert_not_awaited()
+    adapter.send.assert_awaited_once_with(
+        "12345",
+        '🎙️ "hello hermes"',
+        metadata={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_voice_mention_gate_rejects_nonmatching_transcript():
+    runner = _runner()
+
+    with patch(
+        "tools.transcription_tools.transcribe_audio",
+        return_value={"success": True, "transcript": "hello everyone", "provider": "mock"},
+    ) as mock_transcribe:
+        result = await runner._transcribe_voice_mention_gate(
+            "/tmp/telegram-voice.ogg",
+            [re.compile(r"\bhermes\b")],
+        )
+
+    assert result is None
+    mock_transcribe.assert_called_once_with("/tmp/telegram-voice.ogg", None, "gateway")
+
+
+@pytest.mark.asyncio
+async def test_voice_mention_gate_honors_disabled_gateway_stt():
+    runner = _runner()
+    runner.config.stt_enabled = False
+
+    with patch("tools.transcription_tools.transcribe_audio") as mock_transcribe:
+        result = await runner._transcribe_voice_mention_gate(
+            "/tmp/telegram-voice.ogg",
+            [re.compile(r"\bhermes\b")],
+        )
+
+    assert result is None
+    mock_transcribe.assert_not_called()
 
 
 @pytest.mark.asyncio

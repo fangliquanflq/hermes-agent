@@ -118,6 +118,25 @@ def _group_message(
     )
 
 
+def _voice_group_message():
+    message = _group_message(text=None)
+    voice_file = SimpleNamespace(
+        file_path="voice.ogg",
+        download_as_bytearray=AsyncMock(return_value=bytearray(b"voice")),
+    )
+    message.voice = SimpleNamespace(
+        file_size=5,
+        get_file=AsyncMock(return_value=voice_file),
+    )
+    message.audio = None
+    message.photo = None
+    message.video = None
+    message.document = None
+    message.sticker = None
+    message.media_group_id = None
+    return message
+
+
 def _dm_message(text="hello", *, from_user_id=111):
     return SimpleNamespace(
         message_id=43,
@@ -151,6 +170,112 @@ def _bot_command_entity(text, command):
     """
     offset = text.index(command)
     return SimpleNamespace(type="bot_command", offset=offset, length=len(command))
+
+
+def test_captionless_voice_can_satisfy_mention_pattern_before_dispatch(monkeypatch):
+    async def _run():
+        adapter = _make_adapter(
+            require_mention=True,
+            mention_patterns=[r"\bhermes\b"],
+            allowed_chats=["-100"],
+            group_allowed_chats=["-100"],
+        )
+        adapter.gateway_runner = SimpleNamespace(
+            _transcribe_voice_mention_gate=AsyncMock(
+                return_value=('"hermes status"', ["hermes status"]),
+            )
+        )
+        adapter.handle_message = AsyncMock()
+        cache_audio = AsyncMock(return_value="C:/cache/voice.ogg")
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.cache_audio_from_bytes_async",
+            cache_audio,
+        )
+        message = _voice_group_message()
+
+        await adapter._handle_media_message(
+            SimpleNamespace(update_id=1004, message=message),
+            SimpleNamespace(),
+        )
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.media_urls == ["C:/cache/voice.ogg"]
+        assert event._gateway_pending_stt_text == '"hermes status"'
+        assert event._gateway_pending_stt_transcripts == ["hermes status"]
+        message.voice.get_file.assert_awaited_once()
+        cache_audio.assert_awaited_once()
+        adapter.gateway_runner._transcribe_voice_mention_gate.assert_awaited_once_with(
+            "C:/cache/voice.ogg",
+            adapter._mention_patterns,
+        )
+
+    asyncio.run(_run())
+
+
+def test_captionless_voice_without_wake_word_is_transcribed_once_and_dropped(monkeypatch):
+    async def _run():
+        adapter = _make_adapter(
+            require_mention=True,
+            mention_patterns=[r"\bhermes\b"],
+            allowed_chats=["-100"],
+            group_allowed_chats=["-100"],
+        )
+        gate = AsyncMock(return_value=None)
+        adapter.gateway_runner = SimpleNamespace(_transcribe_voice_mention_gate=gate)
+        adapter.handle_message = AsyncMock()
+        cache_audio = AsyncMock(return_value="C:/cache/voice.ogg")
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.cache_audio_from_bytes_async",
+            cache_audio,
+        )
+
+        await adapter._handle_media_message(
+            SimpleNamespace(update_id=1005, message=_voice_group_message()),
+            SimpleNamespace(),
+        )
+
+        adapter.handle_message.assert_not_awaited()
+        cache_audio.assert_awaited_once()
+        gate.assert_awaited_once()
+
+    asyncio.run(_run())
+
+
+def test_reply_to_bot_voice_bypasses_eager_mention_transcription(monkeypatch):
+    async def _run():
+        adapter = _make_adapter(
+            require_mention=True,
+            mention_patterns=[r"\bhermes\b"],
+            allowed_chats=["-100"],
+            group_allowed_chats=["-100"],
+        )
+        gate = AsyncMock()
+        adapter.gateway_runner = SimpleNamespace(_transcribe_voice_mention_gate=gate)
+        adapter.handle_message = AsyncMock()
+        cache_audio = AsyncMock(return_value="C:/cache/voice.ogg")
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.cache_audio_from_bytes_async",
+            cache_audio,
+        )
+        message = _voice_group_message()
+        message.reply_to_message = SimpleNamespace(
+            from_user=SimpleNamespace(id=999),
+            message_id=10,
+            text="previous bot reply",
+            caption=None,
+        )
+
+        await adapter._handle_media_message(
+            SimpleNamespace(update_id=1006, message=message),
+            SimpleNamespace(),
+        )
+
+        adapter.handle_message.assert_awaited_once()
+        cache_audio.assert_awaited_once()
+        gate.assert_not_awaited()
+
+    asyncio.run(_run())
 
 
 def test_unmentioned_group_messages_can_be_observed_without_dispatching():

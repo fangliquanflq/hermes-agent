@@ -20529,6 +20529,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _pending_stt_prepared
             else event.text
         ) or ""
+        _cached_stt_transcripts = (
+            list(getattr(event, "_gateway_pending_stt_transcripts", []) or [])
+            if _pending_stt_prepared
+            else []
+        )
         _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
         _thread_sessions_per_user = getattr(self.config, "thread_sessions_per_user", False)
         # Prefer the already resolved session key from the caller so this write
@@ -20684,6 +20689,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # The enrichment step now leaves a single neutral marker in the
                 # prompt, so the LLM produces one coherent reply in the user's
                 # language. The hardcoded send has therefore been removed.
+
+        if (
+            _cached_stt_transcripts
+            and self._should_echo_stt_transcripts()
+        ):
+            _echo_adapter = self._adapter_for_source(source)
+            if _echo_adapter:
+                await self._echo_pending_stt_transcripts_once(
+                    event,
+                    _echo_adapter,
+                    source,
+                    _cached_stt_transcripts,
+                    metadata=self._thread_metadata_for_source(
+                        source,
+                        self._reply_anchor_for_event(event),
+                    ),
+                    log_context="cached voice mention transcript",
+                )
 
         if audio_file_paths:
             from tools.credential_files import to_agent_visible_cache_path as _to_agent_path
@@ -27959,6 +27982,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return f"{prefix}\n\n{user_text}", successful_transcripts
             return prefix, successful_transcripts
         return user_text, successful_transcripts
+
+    async def _transcribe_voice_mention_gate(
+        self,
+        audio_path: str,
+        mention_patterns,
+    ) -> Optional[tuple[str, List[str]]]:
+        """Transcribe one cached voice note and accept matching wake words."""
+        if not getattr(self.config, "stt_enabled", True):
+            return None
+        enriched_text, transcripts = await self._enrich_message_with_transcription(
+            "",
+            [audio_path],
+        )
+        if any(pattern.search(text) for text in transcripts for pattern in mention_patterns):
+            return enriched_text, transcripts
+        return None
 
     def _pending_event_audio_paths(self, event) -> List[str]:
         """Return STT-eligible paths from a pending voice message."""

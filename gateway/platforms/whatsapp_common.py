@@ -387,7 +387,12 @@ class WhatsAppBehaviorMixin:
                 )
         return cleaned.strip() or text
 
-    def _should_process_message(self, data: Dict[str, Any]) -> bool:
+    def _should_process_message(
+        self,
+        data: Dict[str, Any],
+        *,
+        allow_captionless_voice_pattern: bool = False,
+    ) -> bool:
         chat_id_raw = str(data.get("chatId") or "")
         # WhatsApp uses pseudo-chats for Status updates (Stories) and
         # Channel/Newsletter broadcasts. These are not real conversations
@@ -419,7 +424,17 @@ class WhatsAppBehaviorMixin:
             return True
         if self._message_mentions_bot(data):
             return True
-        return self._message_matches_mention_patterns(data)
+        if self._message_matches_mention_patterns(data):
+            return True
+        media_type = str(data.get("mediaType") or "").strip().lower()
+        body = str(data.get("body") or "").strip().lower()
+        return bool(
+            allow_captionless_voice_pattern
+            and self._mention_patterns
+            and data.get("hasMedia")
+            and media_type in {"ptt", "audio"}
+            and (not body or body == f"[{media_type} received]")
+        )
 
     # ------------------------------------------------------------------ formatting
     def format_message(self, content: str) -> str:
