@@ -4078,7 +4078,15 @@ class ContextCompressor(ContextEngine):
         if len(messages) <= self.protect_last_n + self._protect_head_size(messages) + 1:
             return messages, 0
         before = sum(_estimate_msg_budget_tokens(m) for m in messages)
-        if before < self._proactive_prune_rearm_tokens:
+        # The durable runway is stored on the provider/full-request basis when
+        # real usage is available. A messages-only comparison can never reach
+        # that basis in schema-heavy sessions: the fixed system prompt + tool
+        # schemas may account for a large part of every billed request. Use the
+        # strongest pressure signal the caller has. This also lets sessions
+        # carrying a legacy message-basis runway rearm once, after which the
+        # newly persisted boundary below is overhead-aware.
+        pressure_before = max(before, current_tokens or 0)
+        if pressure_before < self._proactive_prune_rearm_tokens:
             return messages, 0
         # Capability gate BEFORE the expensive multi-pass scan: a bound store that
         # can't persist the prune atomically (duck-typed/plugin session store
@@ -4109,16 +4117,17 @@ class ContextCompressor(ContextEngine):
         reclaimed = max(0, before - after)
         if reclaimed < self.proactive_prune_min_reclaim_tokens:
             return messages, 0
-        # ``after`` includes the tool batch appended since the provider's last
-        # usage reading, so both the low-water mark and future gate use the
-        # same message-token estimate. Require a full trigger-sized growth
-        # interval before another cache-breaking rewrite.
+        # Preserve the observed non-message part of the request in the
+        # low-water mark. Future gates compare provider/full-request pressure
+        # against this same basis, so a large system prompt or tool schema set
+        # cannot permanently park pruning below a message-only runway.
+        observed_non_message_tokens = max(0, pressure_before - before)
         runway = max(
             reclaimed,
             self.proactive_prune_tokens,
             self.proactive_prune_min_reclaim_tokens,
         )
-        next_rearm_tokens = after + runway
+        next_rearm_tokens = after + observed_non_message_tokens + runway
         if session_db and session_id:
             # The capability gate above guarantees archive_and_compact exists.
             try:

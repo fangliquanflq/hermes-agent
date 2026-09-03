@@ -118,7 +118,8 @@ def test_rearms_only_after_reclaimed_token_runway():
 
     first, n1 = c.prune_tool_results_only(msgs, current_tokens=120_000)
     assert n1 >= 3
-    rearm_tokens = sum(map(_estimate_msg_budget_tokens, first)) + 48_000
+    first_message_tokens = sum(map(_estimate_msg_budget_tokens, first))
+    rearm_tokens = c._proactive_prune_rearm_tokens
 
     # Age the two protected large results out of the tail.  They are now a
     # valid >=4K-token prune candidate, but the post-prune prompt has not yet
@@ -129,19 +130,74 @@ def test_rearms_only_after_reclaimed_token_runway():
         _assistant_call("call_9"),
         _tool_msg("call_9", "ok"),
     ]
-    assert sum(map(_estimate_msg_budget_tokens, grown)) < rearm_tokens
-    blocked, n2 = c.prune_tool_results_only(grown, current_tokens=1_000_000)
+    grown_message_tokens = sum(map(_estimate_msg_budget_tokens, grown))
+    grown_pressure = 120_000 + (grown_message_tokens - first_message_tokens)
+    assert grown_pressure < rearm_tokens
+    blocked, n2 = c.prune_tool_results_only(
+        grown, current_tokens=grown_pressure,
+    )
     assert n2 == 0
     assert blocked is grown
     assert len(_tool_by_id(blocked, "call_6")["content"]) == 9000
     assert len(_tool_by_id(blocked, "call_7")["content"]) == 9000
 
-    missing = rearm_tokens - sum(map(_estimate_msg_budget_tokens, grown))
+    missing = rearm_tokens - grown_pressure
     regrown = grown + [{"role": "user", "content": "x" * (missing * 4)}]
-    assert sum(map(_estimate_msg_budget_tokens, regrown)) >= rearm_tokens
-    rearmed, n3 = c.prune_tool_results_only(regrown, current_tokens=1_000_000)
+    regrown_pressure = grown_pressure + (
+        sum(map(_estimate_msg_budget_tokens, regrown)) - grown_message_tokens
+    )
+    assert regrown_pressure >= rearm_tokens
+    rearmed, n3 = c.prune_tool_results_only(
+        regrown, current_tokens=regrown_pressure,
+    )
     assert n3 >= 2
     assert rearmed is not regrown
+
+
+def test_provider_pressure_rearms_when_message_estimate_is_below_legacy_gate():
+    """A schema-heavy prompt must not stay parked behind a message-only gate."""
+    c = _compressor(
+        proactive_prune_tokens=48_000,
+        proactive_prune_min_result_chars=8_000,
+    )
+    messages = _build(8, big_indices={0, 1, 2})
+    message_tokens = sum(map(_estimate_msg_budget_tokens, messages))
+    c._proactive_prune_rearm_tokens = message_tokens + 913
+
+    result, pruned = c.prune_tool_results_only(
+        messages,
+        current_tokens=message_tokens + 144_524,
+    )
+
+    assert pruned >= 3
+    assert result is not messages
+
+
+def test_rearm_runway_preserves_observed_non_message_overhead():
+    c = _compressor(
+        proactive_prune_tokens=48_000,
+        proactive_prune_min_result_chars=8_000,
+    )
+    messages = _build(8, big_indices={0, 1, 2})
+    before = sum(map(_estimate_msg_budget_tokens, messages))
+    provider_prompt_tokens = before + 144_524
+
+    result, pruned = c.prune_tool_results_only(
+        messages,
+        current_tokens=provider_prompt_tokens,
+    )
+
+    assert pruned >= 3
+    after = sum(map(_estimate_msg_budget_tokens, result))
+    reclaimed = before - after
+    runway = max(reclaimed, 48_000, c.proactive_prune_min_reclaim_tokens)
+    assert c._proactive_prune_rearm_tokens == after + 144_524 + runway
+    blocked, second_pruned = c.prune_tool_results_only(
+        result,
+        current_tokens=after + 144_524,
+    )
+    assert blocked is result
+    assert second_pruned == 0
 
 
 def test_successful_full_compression_resets_proactive_runway():

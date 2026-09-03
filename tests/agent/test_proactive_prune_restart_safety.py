@@ -141,9 +141,12 @@ def test_fresh_agent_rearms_after_durable_history_regrowth_once(tmp_path: Path) 
     resumed = _build_agent(db, session_id)
     _configure_pruning(resumed)
     grown = db.get_messages_as_conversation(session_id)
-    assert sum(map(_estimate_msg_budget_tokens, grown)) >= first_runway
+    first_message_tokens = sum(map(_estimate_msg_budget_tokens, first))
+    grown_message_tokens = sum(map(_estimate_msg_budget_tokens, grown))
+    grown_pressure = 120_000 + (grown_message_tokens - first_message_tokens)
+    assert grown_pressure >= first_runway
     second, second_count = resumed.context_compressor.prune_tool_results_only(
-        grown, current_tokens=1_000_000,
+        grown, current_tokens=grown_pressure,
     )
 
     assert second_count >= 1
@@ -153,8 +156,13 @@ def test_fresh_agent_rearms_after_durable_history_regrowth_once(tmp_path: Path) 
     restarted = _build_agent(db, session_id)
     _configure_pruning(restarted)
     durable = db.get_messages_as_conversation(session_id)
+    durable_message_tokens = sum(map(_estimate_msg_budget_tokens, durable))
+    second_low_water = grown_pressure - (
+        grown_message_tokens - durable_message_tokens
+    )
+    assert second_low_water < second_runway
     result, third_count = restarted.context_compressor.prune_tool_results_only(
-        durable, current_tokens=1_000_000,
+        durable, current_tokens=second_low_water,
     )
     assert result is durable
     assert third_count == 0
