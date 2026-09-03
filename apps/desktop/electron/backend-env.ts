@@ -118,6 +118,39 @@ function normalizeHermesHomeRoot(hermesHome, { pathModule = pathModuleForPlatfor
   return resolved
 }
 
+function resolveProfileHermesHome(
+  hermesHome,
+  profile,
+  { pathModule = pathModuleForPlatform(process.platform) }: any = {}
+) {
+  const root = normalizeHermesHomeRoot(hermesHome, { pathModule })
+  const key = String(profile || 'default').trim() || 'default'
+
+  return key === 'default' ? root : pathModule.join(root, 'profiles', key)
+}
+
+function buildProfileBackendEnv({
+  hermesHome,
+  profile,
+  currentEnv = process.env,
+  backendEnv = {},
+  platform = process.platform,
+  pathModule = pathModuleForPlatform(platform)
+}: any = {}) {
+  const env = { ...currentEnv, ...backendEnv }
+
+  // Windows environment keys are case-insensitive. Remove every spelling so
+  // Node cannot choose an inherited alias over the canonical final value.
+  for (const key of Object.keys(env)) {
+    if ((platform === 'win32' ? key.toUpperCase() : key) === 'HERMES_HOME') {
+      delete env[key]
+    }
+  }
+
+  env.HERMES_HOME = resolveProfileHermesHome(hermesHome, profile, { pathModule })
+  return env
+}
+
 function buildDesktopBackendEnv({
   hermesHome,
   pythonPathEntries = [],
@@ -153,9 +186,11 @@ export {
   appendUniquePathEntries,
   buildDesktopBackendEnv,
   buildDesktopBackendPath,
+  buildProfileBackendEnv,
   delimiterForPlatform,
   hermesManagedNodePathEntries,
   normalizeHermesHomeRoot,
   pathEnvKey,
-  POSIX_SANE_PATH_ENTRIES
+  POSIX_SANE_PATH_ENTRIES,
+  resolveProfileHermesHome
 }

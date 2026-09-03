@@ -48,7 +48,13 @@ import {
 import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { BackendDialClaims } from './backend-dial-claim'
-import { buildDesktopBackendEnv, hermesManagedNodePathEntries, normalizeHermesHomeRoot } from './backend-env'
+import {
+  buildDesktopBackendEnv,
+  buildProfileBackendEnv,
+  hermesManagedNodePathEntries,
+  normalizeHermesHomeRoot,
+  resolveProfileHermesHome
+} from './backend-env'
 import {
   isReauthRequiredError,
   makeNousCloudBackendDownError,
@@ -12444,7 +12450,9 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
   const parentStartMarker = await desktopParentStartMarker()
   const backendNonce = crypto.randomBytes(16).toString('hex')
   const parentIdentityEnv = parentWatchdogEnv(process.pid, parentStartMarker, backendNonce)
+  const profileHome = resolveProfileHermesHome(HERMES_HOME, profile)
   assertPoolEntryStillOwned(poolKey, entry)
+  rememberLog(`[env] backend profile="${profile}" HERMES_HOME="${profileHome}"`)
 
   const child = spawn(
     backend.command,
@@ -12452,9 +12460,12 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
     hiddenWindowsChildOptions({
       cwd: hermesCwd,
       env: {
-        ...process.env,
-        HERMES_HOME,
-        ...backend.env,
+        ...buildProfileBackendEnv({
+          hermesHome: HERMES_HOME,
+          profile,
+          currentEnv: process.env,
+          backendEnv: backend.env
+        }),
         // Pin the gateway's tool/terminal cwd to the same directory we chose for
         // the child process. Inherited TERMINAL_CWD (or a stale config bridge)
         // can still point at the install dir even when spawn cwd is home.
@@ -12859,9 +12870,11 @@ async function startHermes() {
     rememberLog(`Starting Hermes backend via ${backend.label}`)
 
     const profile = primaryProfileKey()
+    const profileHome = resolveProfileHermesHome(HERMES_HOME, profile)
     const parentStartMarker = await desktopParentStartMarker()
     const backendNonce = crypto.randomBytes(16).toString('hex')
     const parentIdentityEnv = parentWatchdogEnv(process.pid, parentStartMarker, backendNonce)
+    rememberLog(`[env] backend profile="${profile}" HERMES_HOME="${profileHome}"`)
 
     const hermesProcess = spawn(
       backend.command,
@@ -12869,17 +12882,12 @@ async function startHermes() {
       hiddenWindowsChildOptions({
         cwd: hermesCwd,
         env: {
-          ...process.env,
-          // Explicitly pin HERMES_HOME for the child so Python's get_hermes_home()
-          // resolves to the SAME location our resolveHermesHome() picked. Without
-          // this pin, Python falls back to ~/.hermes on every platform — fine on
-          // mac/linux (where our default matches), but on Windows our default is
-          // %LOCALAPPDATA%\hermes, which differs from C:\Users\<u>\.hermes.
-          // Mismatch would split config / sessions / .env / logs across two
-          // directories. install.ps1 sets HERMES_HOME via setx; the desktop
-          // can't reliably do that, so we set it inline for every spawn.
-          HERMES_HOME,
-          ...backend.env,
+          ...buildProfileBackendEnv({
+            hermesHome: HERMES_HOME,
+            profile,
+            currentEnv: process.env,
+            backendEnv: backend.env
+          }),
           TERMINAL_CWD: hermesCwd,
           HERMES_DASHBOARD_SESSION_TOKEN: token,
           // Marks this dashboard backend as desktop-spawned so it runs the cron

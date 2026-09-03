@@ -7,10 +7,12 @@ import {
   appendUniquePathEntries,
   buildDesktopBackendEnv,
   buildDesktopBackendPath,
+  buildProfileBackendEnv,
   hermesManagedNodePathEntries,
   normalizeHermesHomeRoot,
   pathEnvKey,
-  POSIX_SANE_PATH_ENTRIES
+  POSIX_SANE_PATH_ENTRIES,
+  resolveProfileHermesHome
 } from './backend-env'
 
 test('desktop backend PATH adds Hermes-managed bins and missing POSIX sane entries', () => {
@@ -157,6 +159,48 @@ test('normalizeHermesHomeRoot maps profile homes back to the global Hermes root'
     'C:\\Users\\test\\AppData\\Local\\hermes'
   )
   assert.equal(normalizeHermesHomeRoot('/Users/test/.hermes', { pathModule: path.posix }), '/Users/test/.hermes')
+})
+
+test('profile backend homes keep default and named state stores distinct on Windows', () => {
+  const root = 'C:\\Users\\test\\AppData\\Local\\hermes'
+  const namedHome = resolveProfileHermesHome(root, 'work', { pathModule: path.win32 })
+  const defaultHome = resolveProfileHermesHome(`${root}\\profiles\\work`, 'default', { pathModule: path.win32 })
+
+  assert.equal(namedHome, `${root}\\profiles\\work`)
+  assert.equal(defaultHome, root)
+  assert.notEqual(path.win32.join(namedHome, 'state.db'), path.win32.join(defaultHome, 'state.db'))
+})
+
+test('profile backend env cannot inherit or accept an overriding Windows HERMES_HOME', () => {
+  const root = 'C:\\Users\\test\\AppData\\Local\\hermes'
+  const env = buildProfileBackendEnv({
+    hermesHome: `${root}\\profiles\\work`,
+    profile: 'default',
+    currentEnv: { HERMES_HOME: `${root}\\profiles\\work`, KEEP_PARENT: 'yes' },
+    backendEnv: { Hermes_Home: 'D:\\wrong', KEEP_BACKEND: 'yes' },
+    platform: 'win32',
+    pathModule: path.win32
+  })
+
+  assert.equal(env.HERMES_HOME, root)
+  assert.equal(env.Hermes_Home, undefined)
+  assert.equal(env.KEEP_PARENT, 'yes')
+  assert.equal(env.KEEP_BACKEND, 'yes')
+})
+
+test('profile backend env pins a named profile after backend-specific variables', () => {
+  const env = buildProfileBackendEnv({
+    hermesHome: '/Users/test/.hermes',
+    profile: 'research',
+    currentEnv: { HERMES_HOME: '/inherited', KEEP_PARENT: 'yes' },
+    backendEnv: { HERMES_HOME: '/backend-override', KEEP_BACKEND: 'yes' },
+    platform: 'darwin',
+    pathModule: path.posix
+  })
+
+  assert.equal(env.HERMES_HOME, '/Users/test/.hermes/profiles/research')
+  assert.equal(env.KEEP_PARENT, 'yes')
+  assert.equal(env.KEEP_BACKEND, 'yes')
 })
 
 test('Windows PATH casing and delimiter are preserved without POSIX sane entries', () => {
