@@ -166,6 +166,69 @@ def test_session_interrupt_uses_explicit_stop_compatibility(server, monkeypatch,
     assert calls == ["hard" if kind == "hard-only" else "legacy"]
 
 
+def test_teardown_interrupts_running_turn_before_waiting(server, monkeypatch):
+    calls = []
+
+    class _RunThread:
+        def is_alive(self):
+            return True
+
+        def join(self, timeout):
+            calls.append(("join", timeout))
+
+    session = {
+        "_sid": "runtime-session",
+        "_run_thread": _RunThread(),
+        "history_lock": threading.Lock(),
+        "running": True,
+    }
+    monkeypatch.setattr(
+        server,
+        "_interrupt_session_turn",
+        lambda sid, record: calls.append(("interrupt", sid, record)),
+    )
+    monkeypatch.setattr(
+        server,
+        "_teardown_session",
+        lambda record, *, end_reason: calls.append(("teardown", record, end_reason)),
+    )
+
+    assert server._teardown_popped_session(session, end_reason="session_delete") is True
+    assert calls[0] == ("interrupt", "runtime-session", session)
+    assert calls[1][0] == "join"
+    assert calls[2] == ("teardown", session, "session_delete")
+
+
+def test_close_live_session_by_key_is_profile_scoped(server, monkeypatch, tmp_path):
+    launch = {
+        "agent": types.SimpleNamespace(session_id="stored-session"),
+        "session_key": "stored-session",
+    }
+    sibling_home = tmp_path / "profiles" / "sibling"
+    sibling = {
+        "agent": types.SimpleNamespace(session_id="stored-session"),
+        "profile_home": str(sibling_home),
+        "session_key": "stored-session",
+    }
+    server._sessions.update({"launch-runtime": launch, "sibling-runtime": sibling})
+    closed = []
+    monkeypatch.setattr(
+        server,
+        "_profile_home",
+        lambda profile: sibling_home if profile == "sibling" else None,
+    )
+    monkeypatch.setattr(
+        server,
+        "_teardown_popped_session",
+        lambda record, *, end_reason: closed.append((record, end_reason)) or True,
+    )
+
+    assert server.close_live_session_by_key("stored-session", profile="sibling") is True
+    assert "sibling-runtime" not in server._sessions
+    assert server._sessions["launch-runtime"] is launch
+    assert closed == [(sibling, "session_delete")]
+
+
 # ── write_json ────────────────────────────────────────────────
 
 

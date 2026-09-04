@@ -570,6 +570,11 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
         sid = _resolve_session_id(db, session_id)
         if not sid:
             return {"ok": True, "already_absent": True}
+        # The persisted row and live Desktop runtime are separate state. Tear
+        # down the runtime first so it cannot keep calling the model or write
+        # the in-flight turn back after this delete.
+        from tui_gateway.server import close_live_session_by_key
+        close_live_session_by_key(sid, profile=profile)
         db.delete_session(sid)
         return {"ok": True}
 

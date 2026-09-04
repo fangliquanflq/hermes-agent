@@ -4057,6 +4057,25 @@ class TestDeleteSessionEndpoint:
         assert resp.status_code == 200
         assert resp.json().get("ok") is True
 
+    def test_delete_cancels_live_runtime_before_removing_row(self, monkeypatch):
+        from tui_gateway import server
+
+        self._seed(["running-session"])
+        calls = []
+        monkeypatch.setattr(
+            server,
+            "close_live_session_by_key",
+            lambda sid, *, profile=None: calls.append((sid, profile)) or True,
+            raising=False,
+        )
+
+        resp = self.auth_client.delete("/api/sessions/running-session")
+
+        assert resp.status_code == 200
+        assert resp.json().get("ok") is True
+        assert calls == [("running-session", None)]
+        assert self._exists("running-session") is False
+
 
 class TestBulkDeleteSessionsEndpoint:
     """Tests for ``POST /api/sessions/bulk-delete`` — backs the

@@ -326,10 +326,18 @@ def _teardown_popped_session(session: dict | None, *, end_reason: str = "tui_clo
     if session is None:
         return False
     run_thread = session.get("_run_thread")
-    if end_reason != "tui_shutdown" and run_thread is not None and run_thread is not threading.current_thread():
+    run_thread_alive = bool(
+        run_thread is not None
+        and run_thread is not threading.current_thread()
+        and run_thread.is_alive())
+    if session.get("running") or session.get("_compute_host_active") or run_thread_alive:
         try:
-            if run_thread.is_alive():
-                run_thread.join(timeout=_TURN_SETTLE_BEFORE_CLOSE_SECONDS)
+            _interrupt_session_turn(str(session.get("_sid") or ""), session)
+        except Exception:
+            logger.exception("failed to interrupt session turn during teardown")
+    if end_reason != "tui_shutdown" and run_thread_alive:
+        try:
+            run_thread.join(timeout=_TURN_SETTLE_BEFORE_CLOSE_SECONDS)
             if run_thread.is_alive():
                 logger.warning(
                     "session turn thread still alive after %.1fs teardown grace", _TURN_SETTLE_BEFORE_CLOSE_SECONDS)
@@ -351,6 +359,19 @@ def _close_session_by_id(
             return False
         session = _pop_session_by_id(sid)
     return _teardown_popped_session(session, end_reason=end_reason)
+
+
+def close_live_session_by_key(session_key: str, *, profile: str | None = None) -> bool:
+    """Cancel and tear down the profile-scoped runtime for a stored session."""
+    profile_home = _profile_home(profile)
+    with _session_resume_lock:
+        live = _find_live_session_by_key(session_key, profile_home)
+        if live is None:
+            return False
+        sid, _ = live
+        session = _pop_session_by_id(sid)
+        _cancel_ws_orphan_reap(sid)
+    return _teardown_popped_session(session, end_reason="session_delete")
 
 
 def _ws_session_is_detached(session: dict | None) -> bool:
