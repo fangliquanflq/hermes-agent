@@ -4182,6 +4182,7 @@ def _ensure_session_db_row(session: dict) -> bool:
             healed = canonical_custom_identity(
                 base_url=model_config.get("base_url") or None,
                 model=model_config.get("model") or row_model or None,
+                api_mode=model_config.get("api_mode") or None,
             )
             if healed:
                 model_config["provider"] = healed
@@ -5712,7 +5713,9 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
                 from hermes_cli.runtime_provider import canonical_custom_identity
 
                 healed = canonical_custom_identity(
-                    base_url=base_url or None, model=model or None
+                    base_url=base_url or None,
+                    model=model or None,
+                    api_mode=api_mode or None,
                 )
             except Exception:
                 logger.debug(
@@ -5804,7 +5807,9 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
 
                 provider = (
                     canonical_custom_identity(
-                        base_url=base_url, model=model or None
+                        base_url=base_url,
+                        model=model or None,
+                        api_mode=api_mode or None,
                     )
                     or provider
                 )
@@ -9276,7 +9281,9 @@ def _make_agent(
             from hermes_cli.runtime_provider import canonical_custom_identity
 
             recovered = canonical_custom_identity(
-                base_url=override_base_url or None, model=model or None
+                base_url=override_base_url or None,
+                model=model or None,
+                api_mode=override_api_mode or None,
             )
             if recovered:
                 requested_provider = recovered
@@ -16545,6 +16552,8 @@ def _model_picker_context(agent):
                     base_url=base_url or None,
                     config_provider=ctx.current_provider,
                     model=(getattr(agent, "model", "") if agent else "")
+                    or None,
+                    api_mode=(getattr(agent, "api_mode", "") if agent else "")
                     or None,
                 )
                 or provider

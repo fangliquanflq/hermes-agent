@@ -216,6 +216,7 @@ def test_persist_model_switch_swallows_db_errors():
 def test_persist_model_switch_heals_bare_custom(monkeypatch):
     """Bare 'custom' is not routable — heal to custom:<name> or drop (C1)."""
     written = {}
+    healed_with = {}
 
     class _DB:
         def update_session_model(self, sid, model):
@@ -228,19 +229,23 @@ def test_persist_model_switch_heals_bare_custom(monkeypatch):
         new_model = "qwen3.6-plus"
         target_provider = "custom"
         base_url = "https://my-endpoint/v1"
-        api_mode = ""
+        api_mode = "codex_responses"
 
     import hermes_cli.runtime_provider as rp
-    monkeypatch.setattr(rp, "canonical_custom_identity",
-                        lambda base_url=None, model=None: "custom:myendpoint")
+
+    def _heal(**kwargs):
+        healed_with.update(kwargs)
+        return "custom:myendpoint"
+
+    monkeypatch.setattr(rp, "canonical_custom_identity", _heal)
     stub = _make_stub(_session_db=_DB(), session_id="s1")
     stub._persist_model_switch_to_session(_BareResult())
     assert written["patch"]["provider"] == "custom:myendpoint"
+    assert healed_with["api_mode"] == "codex_responses"
 
     # Healing fails -> provider dropped (explicit None deletes any stale
     # persisted provider), never persisted bare.
-    monkeypatch.setattr(rp, "canonical_custom_identity",
-                        lambda base_url=None, model=None: None)
+    monkeypatch.setattr(rp, "canonical_custom_identity", lambda **kwargs: None)
     written.clear()
     stub._persist_model_switch_to_session(_BareResult())
     assert written["patch"]["provider"] is None
@@ -250,8 +255,7 @@ def test_persist_model_switch_heals_bare_custom(monkeypatch):
 def test_restore_session_model_heals_bare_custom_stored_rows(monkeypatch):
     """Rows persisted by older builds may carry bare 'custom' — heal or drop."""
     import hermes_cli.runtime_provider as rp
-    monkeypatch.setattr(rp, "canonical_custom_identity",
-                        lambda base_url=None, model=None: None)
+    monkeypatch.setattr(rp, "canonical_custom_identity", lambda **kwargs: None)
     stub = _make_stub()
     stub._restore_session_model(_row(model_config={
         "gateway_runtime": {"provider": "custom"},

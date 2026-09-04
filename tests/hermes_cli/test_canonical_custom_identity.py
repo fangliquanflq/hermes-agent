@@ -100,6 +100,72 @@ def test_legacy_unkeyed_entry_keeps_its_name_identity(monkeypatch):
     assert rp.canonical_custom_identity(config_provider="Legacy Endpoint") == "custom:legacy-endpoint"
 
 
+@pytest.fixture
+def ambiguous_custom_provider_config(monkeypatch):
+    config = {
+        "custom_providers": [
+            {
+                "name": "provider-chat",
+                "base_url": BASE_URL,
+                "api_mode": "chat_completions",
+                "model": MODEL,
+                "models": {MODEL: {"context_length": 1000000}},
+            },
+            {
+                "name": "provider-responses",
+                "base_url": BASE_URL,
+                "api_mode": "codex_responses",
+                "model": MODEL,
+                "models": {MODEL: {"context_length": 1000000}},
+            },
+        ]
+    }
+    monkeypatch.setattr(rp, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda *a, **k: config)
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    return config
+
+
+def test_api_mode_disambiguates_same_url_custom_providers(ambiguous_custom_provider_config):
+    assert (
+        rp.find_custom_provider_identity(BASE_URL, api_mode="codex_responses")
+        == "custom:provider-responses"
+    )
+
+
+def test_api_mode_disambiguates_same_model_custom_providers(ambiguous_custom_provider_config):
+    assert (
+        rp.find_custom_provider_identity_by_model(MODEL, api_mode="codex_responses")
+        == "custom:provider-responses"
+    )
+
+
+def test_canonical_identity_uses_api_mode_for_ambiguous_runtime(
+    ambiguous_custom_provider_config,
+):
+    assert (
+        rp.canonical_custom_identity(
+            base_url=BASE_URL,
+            model=MODEL,
+            api_mode="codex_responses",
+        )
+        == "custom:provider-responses"
+    )
+
+
+def test_unknown_api_mode_preserves_legacy_first_match_fallback(
+    ambiguous_custom_provider_config,
+):
+    assert (
+        rp.canonical_custom_identity(
+            base_url=BASE_URL,
+            model=MODEL,
+            api_mode="future_protocol",
+        )
+        == "custom:provider-chat"
+    )
+
+
 class TestIsRoutableProvider:
     """``is_routable_provider`` gates session-resume fallback: a persisted
     provider name that no longer resolves (renamed/removed) must be detected

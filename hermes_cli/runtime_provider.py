@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from urllib.parse import urlparse
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -949,12 +949,30 @@ def has_named_custom_provider(requested_provider: str) -> bool:
         return False
 
 
-def find_custom_provider_identity(base_url: str) -> Optional[str]:
+def _select_custom_provider_identity(
+    candidates: List[Tuple[str, Dict[str, Any]]], api_mode: Optional[str]
+) -> Optional[str]:
+    """Prefer a matching transport while preserving first-match fallback."""
+    if not candidates:
+        return None
+    target_mode = _parse_api_mode(api_mode)
+    if target_mode:
+        for identity, entry in candidates:
+            if _parse_api_mode(entry.get("api_mode") or entry.get("transport")) == target_mode:
+                return identity
+    return candidates[0][0]
+
+
+def find_custom_provider_identity(
+    base_url: str, *, api_mode: Optional[str] = None
+) -> Optional[str]:
     """Map an endpoint URL back to its canonical ``custom:<name>`` menu key.
 
-    Returns the ``custom:<normalized-name>`` slug of the first ``providers:``
-    / ``custom_providers:`` entry whose base_url matches, or ``None`` when no
-    entry owns the URL.
+    Returns the ``custom:<normalized-name>`` slug of the matching ``providers:``
+    / ``custom_providers:`` entry. When multiple entries own the URL,
+    ``api_mode`` selects the matching transport; absent or unmatched modes
+    retain the legacy first-match fallback. Returns ``None`` when no entry owns
+    the URL.
 
     Session persistence stores the agent's *resolved* provider, and for every
     named custom endpoint that is the literal string ``"custom"`` — the entry
@@ -973,6 +991,7 @@ def find_custom_provider_identity(base_url: str) -> Optional[str]:
     except Exception:
         return None
 
+    candidates: List[Tuple[str, Dict[str, Any]]] = []
     providers = config.get("providers")
     if isinstance(providers, dict):
         for ep_name, entry in providers.items():
@@ -982,7 +1001,9 @@ def find_custom_provider_identity(base_url: str) -> Optional[str]:
                 entry.get("api") or entry.get("url") or entry.get("base_url") or ""
             )
             if _normalize_base_url_for_match(entry_url) == target:
-                return custom_provider_slug(str(ep_name), str(ep_name))
+                candidates.append(
+                    (custom_provider_slug(str(ep_name), str(ep_name)), entry)
+                )
 
     try:
         custom_providers = get_compatible_custom_providers(config)
@@ -995,21 +1016,30 @@ def find_custom_provider_identity(base_url: str) -> Optional[str]:
         if not isinstance(name, str) or not name.strip():
             continue
         if _normalize_base_url_for_match(entry.get("base_url")) == target:
-            return custom_provider_slug(
-                name,
-                str(entry.get("provider_key", "") or ""),
+            candidates.append(
+                (
+                    custom_provider_slug(
+                        name,
+                        str(entry.get("provider_key", "") or ""),
+                    ),
+                    entry,
+                )
             )
 
-    return None
+    return _select_custom_provider_identity(candidates, api_mode)
 
 
-def find_custom_provider_identity_by_model(model: str) -> Optional[str]:
+def find_custom_provider_identity_by_model(
+    model: str, *, api_mode: Optional[str] = None
+) -> Optional[str]:
     """Map a model id back to the ``custom:<name>`` entry that serves it.
 
-    Returns the ``custom:<normalized-name>`` slug of the first ``providers:``
+    Returns the ``custom:<normalized-name>`` slug of the matching ``providers:``
     / ``custom_providers:`` entry whose ``model`` / ``default_model`` matches,
-    or whose ``models`` catalog (dict or list shape) contains the id.
-    ``None`` when no entry serves the model.
+    or whose ``models`` catalog (dict or list shape) contains the id. When
+    multiple entries serve it, ``api_mode`` selects the matching transport;
+    absent or unmatched modes retain the legacy first-match fallback. ``None``
+    is returned when no entry serves the model.
 
     Companion to :func:`find_custom_provider_identity` (URL reverse-lookup)
     for the persistence paths where no base_url survived the round-trip: the
@@ -1046,13 +1076,16 @@ def find_custom_provider_identity_by_model(model: str) -> Optional[str]:
                         return True
         return False
 
+    candidates: List[Tuple[str, Dict[str, Any]]] = []
     providers = config.get("providers")
     if isinstance(providers, dict):
         for ep_name, entry in providers.items():
             if not isinstance(entry, dict):
                 continue
             if _entry_serves_model(entry):
-                return custom_provider_slug(str(ep_name), str(ep_name))
+                candidates.append(
+                    (custom_provider_slug(str(ep_name), str(ep_name)), entry)
+                )
 
     try:
         custom_providers = get_compatible_custom_providers(config)
@@ -1065,12 +1098,17 @@ def find_custom_provider_identity_by_model(model: str) -> Optional[str]:
         if not isinstance(name, str) or not name.strip():
             continue
         if _entry_serves_model(entry):
-            return custom_provider_slug(
-                name,
-                str(entry.get("provider_key", "") or ""),
+            candidates.append(
+                (
+                    custom_provider_slug(
+                        name,
+                        str(entry.get("provider_key", "") or ""),
+                    ),
+                    entry,
+                )
             )
 
-    return None
+    return _select_custom_provider_identity(candidates, api_mode)
 
 
 def canonical_custom_identity(
@@ -1078,6 +1116,7 @@ def canonical_custom_identity(
     base_url: Optional[str] = None,
     config_provider: Optional[str] = None,
     model: Optional[str] = None,
+    api_mode: Optional[str] = None,
 ) -> Optional[str]:
     """Recover a routable ``custom:<name>`` identity for a bare custom provider.
 
@@ -1094,14 +1133,15 @@ def canonical_custom_identity(
 
     1. ``base_url`` — reverse-lookup the entry that owns the endpoint URL
        (the one fact that always survives the persistence round-trip when a
-       URL was recorded).
+       URL was recorded). ``api_mode`` disambiguates entries sharing the URL.
     2. ``model`` — reverse-lookup the entry that serves the session's model
        (``model``/``default_model``/``models`` catalog). The session row
        always stores the model name, so when no base_url survived (the
        recurring Desktop/TUI regression vector) the model is the last
        session-scoped fact that can recover the entry — and unlike the
        config fallback below it stays correct after the user points their
-       global default at a different provider.
+       global default at a different provider. ``api_mode`` disambiguates
+       entries sharing the model id.
     3. ``config_provider`` — the active ``config.model.provider`` (or its
        ``provider``/``HERMES_INFERENCE_PROVIDER`` equivalent). When neither
        a base_url nor a model recovered the entry, the configured provider
@@ -1114,13 +1154,13 @@ def canonical_custom_identity(
     """
     # 1. Reverse-lookup by endpoint URL.
     if base_url:
-        identity = find_custom_provider_identity(base_url)
+        identity = find_custom_provider_identity(base_url, api_mode=api_mode)
         if identity:
             return identity
 
     # 2. Reverse-lookup by the session's model name.
     if model:
-        identity = find_custom_provider_identity_by_model(model)
+        identity = find_custom_provider_identity_by_model(model, api_mode=api_mode)
         if identity:
             return identity
 
@@ -1146,17 +1186,12 @@ def canonical_custom_identity(
             # ``candidate`` matched, but it may be the entry's DISPLAY NAME —
             # ``_get_named_custom_provider`` accepts either spelling. For a
             # keyed ``providers:`` entry the display name is not the durable
-            # identity, so re-resolve through the endpoint the matched entry
-            # owns and return the same config-key slug every other path
-            # returns (7b5a18817). Without this, a display name that differs
-            # from its key heals to ``custom:<display-name>`` and stops
-            # matching the persisted identity.
-            identity = find_custom_provider_identity(str(entry.get("base_url") or ""))
-            if identity:
-                return identity
-            if candidate_norm.startswith("custom:"):
-                return candidate_norm
-            return f"custom:{candidate_norm}"
+            # identity, so build the slug from the matched entry's provider_key
+            # rather than reverse-looking up its potentially shared URL.
+            return custom_provider_slug(
+                str(entry.get("name") or candidate),
+                str(entry.get("provider_key") or ""),
+            )
     except Exception:
         pass
     return None

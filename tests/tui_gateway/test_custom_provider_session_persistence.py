@@ -53,6 +53,25 @@ PROVIDERS_DICT_CONFIG = {
     }
 }
 
+AMBIGUOUS_TRANSPORT_CONFIG = {
+    "custom_providers": [
+        {
+            "name": "provider-chat",
+            "base_url": MIMO_URL,
+            "api_key": "chat-key",
+            "api_mode": "chat_completions",
+            "model": "mimo-v2.5-pro",
+        },
+        {
+            "name": "provider-responses",
+            "base_url": MIMO_URL,
+            "api_key": "responses-key",
+            "api_mode": "codex_responses",
+            "model": "mimo-v2.5-pro",
+        },
+    ]
+}
+
 
 def _custom_agent(base_url=MIMO_URL):
     return types.SimpleNamespace(
@@ -88,6 +107,17 @@ class TestRuntimeModelConfigPersistsEntryIdentity:
         config = _runtime_model_config(_custom_agent())
 
         assert config["provider"] == "custom"
+
+    def test_api_mode_preserves_identity_when_url_and_model_overlap(self, monkeypatch):
+        monkeypatch.setattr(rp, "load_config", lambda: AMBIGUOUS_TRANSPORT_CONFIG)
+
+        from tui_gateway.server import _runtime_model_config
+
+        agent = _custom_agent()
+        agent.api_mode = "codex_responses"
+        config = _runtime_model_config(agent)
+
+        assert config["provider"] == "custom:provider-responses"
 
     def test_non_custom_provider_untouched(self, monkeypatch):
         def _boom():
