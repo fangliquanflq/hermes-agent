@@ -21,6 +21,7 @@ Everything is driven by the ``local_runtime`` section of config.yaml.
 from hermes_cli.local_runtime.binaries import (  # noqa: F401
     BinaryResolutionError,
     ensure_runtime_installed,
+    resolve_auto_assets,
     resolve_assets,
     select_backend,
 )

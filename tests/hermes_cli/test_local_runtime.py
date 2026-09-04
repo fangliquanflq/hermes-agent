@@ -20,6 +20,7 @@ import pytest
 from hermes_cli.local_runtime.binaries import (
     AssetPlan,
     BinaryResolutionError,
+    resolve_auto_assets,
     resolve_assets,
     select_backend,
 )
@@ -226,6 +227,15 @@ def test_install_dir_is_profile_scoped(tmp_path, monkeypatch):
 ])
 def test_backend_selection(vendor, os_name, expected):
     assert select_backend(vendor, os_name=os_name) == expected
+
+
+def test_prebuilt_backend_falls_back_for_linux_nvidia():
+    """Auto setup must not select a CUDA build the release cannot ship."""
+    plan = resolve_auto_assets(
+        "b10679", "NVIDIA GeForce RTX 4090", os_name="ubuntu", arch="x64")
+
+    assert plan.backend == "vulkan"
+    assert plan.assets == ["llama-b10679-bin-ubuntu-vulkan-x64.tar.gz"]
 
 
 def test_sha256_mismatch_rejects(tmp_path, monkeypatch):

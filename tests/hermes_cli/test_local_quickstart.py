@@ -107,6 +107,45 @@ def test_quickstart_runs_all_three_legs(client, monkeypatch, tmp_path):
     assert load_config()["local_runtime"]["enabled"] is True
 
 
+def test_quickstart_linux_nvidia_falls_back_to_prebuilt_vulkan(
+        client, monkeypatch, tmp_path):
+    """The one-click path must select an installable Linux NVIDIA backend."""
+    installed: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.binaries._host_os_arch",
+        lambda: ("ubuntu", "x64"))
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.bootstrap._detect_gpu_vendor",
+        lambda: "NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.binaries.installed_tags", lambda: [])
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.binaries.ensure_runtime_installed",
+        lambda tag, backend, progress=None: installed.append(backend))
+
+    def _fake_download(url, dest, job, *, base_done=0, keep_totals=False):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"GGUF\x00")
+
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models.download_file", _fake_download)
+    monkeypatch.setattr(
+        "hermes_cli.local_runtime.bootstrap.ensure_local_runtime",
+        lambda config, force=False: None)
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models._state_endpoint",
+        lambda: {"base_url": "http://127.0.0.1:1/v1", "api_key": "k"})
+    from hermes_cli import web_deps
+
+    monkeypatch.setattr(web_deps, "late", lambda name: (lambda *a, **k: None))
+
+    response = client.post("/api/local-models/quickstart", json={})
+    assert response.status_code == 200
+    job = _wait_job(client, response.json()["job_id"])
+    assert job["status"] == "done", job["error"]
+    assert installed == ["vulkan"]
+
+
 def test_quickstart_skips_satisfied_legs(client, monkeypatch):
     """Runtime present and model already staged: the response says so and
     the job goes straight to activation."""

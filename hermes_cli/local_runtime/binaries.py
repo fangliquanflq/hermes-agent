@@ -193,6 +193,34 @@ def resolve_assets(tag: str, backend: str, os_name: str | None = None,
     raise BinaryResolutionError(f"unsupported platform {os_name}-{arch}")
 
 
+def resolve_auto_assets(tag: str, gpu_vendor: str | None,
+                        os_name: str | None = None,
+                        arch: str | None = None) -> AssetPlan:
+    """Resolve the best prebuilt backend this host can actually install.
+
+    Hardware preference alone is insufficient: llama.cpp does not publish
+    every backend on every platform. Auto setup therefore walks the supported
+    degradation ladder while explicit backend requests remain strict.
+    """
+    host_os, host_arch = _host_os_arch()
+    os_name = os_name or host_os
+    arch = arch or host_arch
+    preferred = select_backend(gpu_vendor, os_name=os_name)
+    candidates = {
+        "cuda": ("cuda", "vulkan", "cpu"),
+        "vulkan": ("vulkan", "cpu"),
+    }.get(preferred, (preferred,))
+
+    last_error: BinaryResolutionError | None = None
+    for backend in candidates:
+        try:
+            return resolve_assets(tag, backend, os_name=os_name, arch=arch)
+        except BinaryResolutionError as exc:
+            last_error = exc
+    assert last_error is not None
+    raise last_error
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
