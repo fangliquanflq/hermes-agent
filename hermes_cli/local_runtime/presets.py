@@ -65,13 +65,30 @@ def _override_int(overrides: dict, key: str, model_id: str) -> int | None:
     return parsed
 
 
+def effective_ctx_cap(launch_overrides: object, model_id: str,
+                      native_window: int) -> int | None:
+    """Validated per-model context cap, normalized to Hermes' floor and model native limit."""
+    if not isinstance(launch_overrides, dict):
+        if launch_overrides is not None:
+            logger.warning("ignoring invalid local_runtime.launch_overrides=%r", launch_overrides)
+        return None
+    model_overrides = launch_overrides.get(model_id) or {}
+    if not isinstance(model_overrides, dict):
+        logger.warning("ignoring invalid local_runtime.launch_overrides.%s=%r",
+                       model_id, model_overrides)
+        return None
+    configured = _override_int(model_overrides, "ctx-size", model_id)
+    if configured is None:
+        return None
+    return max(min(FLOOR, native_window), min(configured, native_window))
+
+
 def _cap_window(profile: ModelProfile, budget: HardwareBudget, decision: WindowDecision,
                 configured: int | None) -> WindowDecision:
     """Apply a configured upper bound without weakening the 64K/native safety floor."""
     if configured is None:
         return decision
-    native = profile.n_ctx_train or decision.window
-    capped = max(min(FLOOR, native), min(configured, native, decision.window))
+    capped = min(configured, decision.window)
     if capped == decision.window:
         return decision
     kv = ctx_bytes(profile, capped)
@@ -167,7 +184,7 @@ def _preset_for(gguf: Path, budget: HardwareBudget, mtp_capable: set[str],
         logger.warning("preset skip %s: %s", gguf.name, exc)
         return None
     entry = entry_for_model(model_id)
-    model_overrides = (launch_overrides or {}).get(model_id) or {}
+    model_overrides = launch_overrides.get(model_id) or {} if isinstance(launch_overrides, dict) else {}
     if not isinstance(model_overrides, dict):
         logger.warning("ignoring invalid local_runtime.launch_overrides.%s=%r",
                        model_id, model_overrides)
@@ -194,7 +211,7 @@ def _preset_for(gguf: Path, budget: HardwareBudget, mtp_capable: set[str],
     decision = _restore_grown_window(model_id, profile, budget, decision, overhead)
     decision = _cap_window(
         profile, budget, decision,
-        _override_int(model_overrides, "ctx-size", model_id),
+        effective_ctx_cap(launch_overrides, model_id, profile.n_ctx_train or decision.window),
     )
 
     # The policy launch flags match the pricing above (same entry/is_mtp/posture). User caps may

@@ -57,6 +57,65 @@ def test_growth_declines_foreign_endpoints(hermes_home):
     assert grown is None
 
 
+def _patch_managed_growth(monkeypatch, tmp_path, *, cap, next_window):
+    import hermes_cli.local_runtime.bootstrap as boot
+    import hermes_cli.local_runtime.context_policy as policy
+    import hermes_cli.local_runtime.growth as growth
+    import hermes_cli.local_runtime.hardware as hardware
+
+    class _Supervisor:
+        def is_idle(self, model_id):
+            return True
+
+    gguf = tmp_path / "model-a.gguf"
+    gguf.write_bytes(b"GGUF")
+    profile = _tiny_profile("model-a")
+    monkeypatch.setattr(boot, "get_supervisor", lambda: _Supervisor())
+    monkeypatch.setattr(boot, "staged_models", lambda: [gguf])
+    monkeypatch.setattr(boot, "refresh_local_runtime", lambda: True)
+    monkeypatch.setattr(growth, "is_managed_endpoint", lambda base_url: True)
+    monkeypatch.setattr("hermes_cli.local_runtime.gguf.read_gguf_header", lambda path: object())
+    monkeypatch.setattr("hermes_cli.local_runtime.estimator.profile_from_gguf", lambda header: profile)
+    monkeypatch.setattr(hardware, "probe_budget", lambda planning: object())
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+        "local_runtime": {"launch_overrides": {"model-a": {"ctx-size": cap}}},
+    })
+    monkeypatch.setattr(policy, "growth_decision", lambda *args, **kwargs: type("Decision", (), {
+        "action": "grow", "next_window": next_window, "reason": "test growth",
+    })())
+    return growth
+
+
+def test_growth_stops_at_configured_context_cap(hermes_home, tmp_path, monkeypatch):
+    growth = _patch_managed_growth(monkeypatch, tmp_path, cap=65536, next_window=98304)
+    writes = []
+    refreshes = []
+    monkeypatch.setattr(growth, "save_window_override", lambda *args: writes.append(args))
+    monkeypatch.setattr("hermes_cli.local_runtime.bootstrap.refresh_local_runtime",
+                        lambda: refreshes.append(True) or True)
+
+    result = growth.maybe_grow_window(
+        "model-a", base_url="http://127.0.0.1:8080/v1",
+        session_tokens=60_000, current_window=65536)
+
+    assert result is None
+    assert writes == []
+    assert refreshes == []
+
+
+def test_growth_clamps_next_rung_to_configured_context_cap(hermes_home, tmp_path, monkeypatch):
+    growth = _patch_managed_growth(monkeypatch, tmp_path, cap=81920, next_window=98304)
+    writes = []
+    monkeypatch.setattr(growth, "save_window_override", lambda *args: writes.append(args))
+
+    result = growth.maybe_grow_window(
+        "model-a", base_url="http://127.0.0.1:8080/v1",
+        session_tokens=60_000, current_window=65536)
+
+    assert result == 81920
+    assert writes == [("model-a", 81920)]
+
+
 def test_occupancy_confirmed_skips_gate_one():
     """The agent's compression gate IS the occupancy signal: when it fired,
     growth must not re-derive its own edge and hold. Decision-table check

@@ -75,6 +75,7 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
     from hermes_cli.local_runtime.estimator import profile_from_gguf
     from hermes_cli.local_runtime.gguf import read_gguf_header
     from hermes_cli.local_runtime.hardware import probe_budget
+    from hermes_cli.local_runtime.presets import effective_ctx_cap
 
     sup = get_supervisor()
     if sup is None or not is_managed_endpoint(base_url):
@@ -88,6 +89,17 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
         profile = profile_from_gguf(read_gguf_header(gguf))
     except (ValueError, OSError) as exc:
         logger.debug("growth skip %s: unreadable gguf (%s)", model_id, exc)
+        return None
+
+    from hermes_cli.config import load_config
+
+    config = load_config()
+    launch_overrides = ((config.get("local_runtime") or {}).get("launch_overrides")
+                        if isinstance(config, dict) else None)
+    context_cap = effective_ctx_cap(
+        launch_overrides, model_id, profile.n_ctx_train or current_window)
+    if context_cap is not None and current_window >= context_cap:
+        logger.debug("growth %s: configured context cap reached (%s)", model_id, context_cap)
         return None
 
     try:
@@ -113,11 +125,14 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
         logger.debug("growth %s: %s (%s)", model_id, decision.action, decision.reason)
         return None
 
+    next_window = min(decision.next_window, context_cap) if context_cap is not None else decision.next_window
+    if next_window <= current_window:
+        return None
     logger.info("context growth %s: %s", model_id, decision.reason)
-    save_window_override(model_id, decision.next_window)
+    save_window_override(model_id, next_window)
     if not refresh_local_runtime():
         # The override still lands at the next boot; report no growth NOW so the caller
         # compresses instead of overflowing a stale window.
         logger.warning("growth %s: server refresh failed; compression proceeds", model_id)
         return None
-    return decision.next_window
+    return next_window
