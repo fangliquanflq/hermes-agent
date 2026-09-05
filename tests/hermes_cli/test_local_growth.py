@@ -198,6 +198,38 @@ def test_preset_ignores_override_below_launch_window(hermes_home, tmp_path, monk
     assert entry.window == 131072
 
 
+def test_launch_overrides_survive_preset_regeneration(hermes_home, tmp_path, monkeypatch):
+    """User launch limits are reapplied after every generated-policy rewrite."""
+    import configparser
+
+    import hermes_cli.local_runtime.presets as presets_mod
+    from hermes_cli.local_runtime.estimator import HardwareBudget
+
+    mdir = tmp_path / "models"
+    _stage_fake_gguf(mdir, "tiny-dense")
+    monkeypatch.setattr(presets_mod, "read_gguf_header", lambda p: _header_stub())
+    monkeypatch.setattr(presets_mod, "profile_from_gguf",
+                        lambda h: _tiny_profile("tiny-dense"))
+    gib = 1 << 30
+    budget = HardwareBudget(usable_vram_bytes=24 * gib,
+                            total_device_bytes=24 * gib,
+                            ram_available_bytes=64 * gib)
+    overrides = {
+        "tiny-dense": {"ctx-size": 65536, "batch-size": 512, "ubatch-size": 512},
+    }
+    preset = tmp_path / "presets.ini"
+
+    for _ in range(2):
+        entry = presets_mod.generate_presets(
+            mdir, budget, preset, launch_overrides=overrides)[0]
+        ini = configparser.ConfigParser()
+        ini.read(preset)
+        assert entry.window == 65536
+        assert ini["tiny-dense"]["ctx-size"] == "65536"
+        assert ini["tiny-dense"]["batch-size"] == "512"
+        assert ini["tiny-dense"]["ubatch-size"] == "512"
+
+
 def test_preset_restores_grown_window_midladder(hermes_home, tmp_path, monkeypatch):
     """The real growth shape: launch at a lower rung, override to a middle
     rung -> the preset window follows the override."""
