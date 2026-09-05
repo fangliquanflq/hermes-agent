@@ -541,10 +541,19 @@ class SessionSearchMixin:
                     "AND name IN ('messages_fts', 'messages_fts_trigram') AND sql LIKE 'CREATE VIRTUAL TABLE%'"
                 )
                 conn.execute("PRAGMA writable_schema=RESET")
+                # Rename only shadows owned by the two vtables removed above.
+                # Prefix matching also captures the independent CJK family,
+                # whose tokenizer may not be loaded on this connection.
+                shadow_names = tuple(
+                    f"{table}_{suffix}"
+                    for table in ("messages_fts", "messages_fts_trigram")
+                    for suffix in ("data", "idx", "content", "docsize", "config")
+                )
+                placeholders = ", ".join("?" for _ in shadow_names)
                 for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' "
-                    "AND (name LIKE 'messages_fts_%' ESCAPE '\\' "
-                    "OR name LIKE 'messages_fts_trigram_%' ESCAPE '\\')"
+                    f"AND name IN ({placeholders})",
+                    shadow_names,
                 ).fetchall():
                     conn.execute(f"ALTER TABLE {row[0]} RENAME TO fts_v22_trash_{row[0]}")
             # Claim the backfill BEFORE the empty v23 tables exist so a crash before

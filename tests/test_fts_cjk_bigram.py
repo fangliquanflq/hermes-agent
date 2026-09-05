@@ -212,6 +212,80 @@ def test_legacy_v22_optimize_lands_on_cjk(cjk_so, tmp_path, monkeypatch):
         d.close()
 
 
+def test_legacy_demote_without_tokenizer_preserves_cjk_family_on_resume(
+    cjk_so, tmp_path, monkeypatch
+):
+    """Legacy demote owns only the base/trigram shadows, not the independent
+    CJK index. A tokenizer-less optimize must preserve that family across an
+    interrupted schema-create and the subsequent resume."""
+    db_path = tmp_path / "state.db"
+    monkeypatch.setenv("HERMES_FTS5_CJK_SO", str(cjk_so))
+    seeded = SessionDB(db_path=db_path)
+    seeded.create_session(session_id="s1", source="cli", model="m")
+    seeded.append_message("s1", role="user", content="레거시 일본 메시지")
+    seeded.close()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.enable_load_extension(True)
+    conn.load_extension(str(cjk_so))
+    conn.executescript("""
+        DROP TRIGGER IF EXISTS messages_fts_insert;
+        DROP TRIGGER IF EXISTS messages_fts_delete;
+        DROP TRIGGER IF EXISTS messages_fts_update;
+        DROP TRIGGER IF EXISTS messages_fts_trigram_insert;
+        DROP TRIGGER IF EXISTS messages_fts_trigram_delete;
+        DROP TRIGGER IF EXISTS messages_fts_trigram_update;
+        DROP TABLE messages_fts;
+        DROP TABLE messages_fts_trigram;
+        DROP VIEW IF EXISTS messages_fts_trigram_src;
+        CREATE VIRTUAL TABLE messages_fts USING fts5(content);
+        DELETE FROM state_meta WHERE key = 'fts_storage_version';
+        INSERT INTO state_meta (key, value) VALUES ('fts_optimize_available', '1')
+        ON CONFLICT(key) DO UPDATE SET value = '1';
+    """)
+    conn.close()
+
+    monkeypatch.setenv("HERMES_FTS5_CJK_SO", str(tmp_path / "absent.so"))
+    db = SessionDB(db_path=db_path)
+    try:
+        assert not db._fts_cjk_loaded
+        cjk_names = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'messages_fts_cjk%'"
+            )
+        }
+        assert "messages_fts_cjk" in cjk_names
+
+        original_ensure = db._ensure_v23_fts_tables
+        db._ensure_v23_fts_tables = lambda _message: (_ for _ in ()).throw(
+            sqlite3.OperationalError("simulated crash mid-ensure")
+        )
+        with pytest.raises(sqlite3.OperationalError, match="simulated crash"):
+            db.optimize_fts_storage(vacuum=False)
+
+        assert db.get_meta("fts_rebuild_high_water") is not None
+        assert {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'messages_fts_cjk%'"
+            )
+        } == cjk_names
+
+        db._ensure_v23_fts_tables = original_ensure
+        result = db.optimize_fts_storage(vacuum=False)
+        assert result["ok"] is True
+        assert {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'messages_fts_cjk%'"
+            )
+        } == cjk_names
+        assert db.search_messages("레거시", limit=10)
+    finally:
+        db.close()
+
+
 def test_pure_latin_embedded_in_cjk_recovered_via_cjk_index(db):
     """#54242 residual: a pure-Latin query for a token embedded in CJK text
     (no whitespace) misses on unicode61; with the cjk index available the
