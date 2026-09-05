@@ -15,6 +15,7 @@ Pins the contract:
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -294,6 +295,67 @@ class TestCleanStreamEndBeforeAnyToolArgs:
             "auto-execute with a silently substituted empty object."
         )
         assert getattr(response, "_dropped_tool_names", None) == ["write_file"]
+
+
+class TestRepetitionDominatedToolArguments:
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_repetition_dominated_valid_json_is_treated_as_truncated(
+        self, _mock_close, mock_create,
+    ):
+        repeated = (
+            "amen shalom salaam peace out yo wassup this model output is stuck "
+            "repeating the same command payload verbatim\n"
+        ) * 40
+
+        def _completed_stream():
+            yield _make_stream_chunk(tool_calls=[
+                _make_tool_call_delta(index=0, tc_id="call_x", name="terminal"),
+            ])
+            yield _make_stream_chunk(tool_calls=[
+                _make_tool_call_delta(
+                    index=0,
+                    arguments=json.dumps({"command": repeated}),
+                ),
+            ])
+            yield _make_stream_chunk(finish_reason="tool_calls")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = lambda *a, **kw: _completed_stream()
+        mock_create.return_value = mock_client
+
+        response = _make_agent()._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == FINISH_REASON_LENGTH
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_healthy_long_valid_json_remains_executable(
+        self, _mock_close, mock_create,
+    ):
+        command = "\n".join(
+            f"printf 'unique payload line {i} value-{i * i}'" for i in range(80)
+        )
+
+        def _completed_stream():
+            yield _make_stream_chunk(tool_calls=[
+                _make_tool_call_delta(index=0, tc_id="call_x", name="terminal"),
+            ])
+            yield _make_stream_chunk(tool_calls=[
+                _make_tool_call_delta(
+                    index=0,
+                    arguments=json.dumps({"command": command}),
+                ),
+            ])
+            yield _make_stream_chunk(finish_reason="tool_calls")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = lambda *a, **kw: _completed_stream()
+        mock_create.return_value = mock_client
+
+        response = _make_agent()._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == "tool_calls"
 
 
 # ── Mixed response: one complete call, one dropped (#80498) ─────────────────
