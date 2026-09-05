@@ -7,6 +7,7 @@ other-process supervisors keep their own policies.
 from __future__ import annotations
 
 from contextlib import suppress
+from dataclasses import replace
 import json
 import logging
 
@@ -107,11 +108,14 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
     except Exception:  # noqa: BLE001
         server_idle = False
 
+    decision_profile = (
+        replace(profile, n_ctx_train=context_cap) if context_cap is not None else profile
+    )
     decision = growth_decision(
         # Capacity budget, not live-free: growth executes via a server bounce, so the grown
         # instance loads onto a freed card. Live-free is distorted by the very model being grown
         # — it reads its own residency as unavailable and vetoes rungs that fit.
-        profile, probe_budget(planning=True),
+        decision_profile, probe_budget(planning=True),
         current_window=current_window,
         session_tokens=session_tokens,
         measured_decode_tok_s=measured_decode_tok_s,
