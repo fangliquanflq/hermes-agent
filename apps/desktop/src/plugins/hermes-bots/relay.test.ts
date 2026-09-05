@@ -26,7 +26,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ProfileRoute } from './types'
 
-const { clearBotAttentionMock, hostMock, noteBotAttentionMock, UnboundedCache } = vi.hoisted(() => ({
+const { botMetaMock, clearBotAttentionMock, hostMock, noteBotAttentionMock, UnboundedCache } = vi.hoisted(() => ({
+  botMetaMock: {} as Record<string, { title?: string }>,
   clearBotAttentionMock: vi.fn(),
   hostMock: {
     onEvent: vi.fn(),
@@ -48,8 +49,16 @@ vi.mock('@hermes/plugin-sdk', () => ({ host: hostMock, LruCache: UnboundedCache 
 
 vi.mock('./data', () => ({
   botHandle: (name: string) => (name === 'default' ? 'hermes' : name),
-  botMentionTag: (profile: { name: string; ui_meta?: Record<string, { title?: string }> }) =>
-    String(profile.ui_meta?.['hermes-bots']?.title || (profile.name === 'default' ? 'hermes' : profile.name))
+  botMentionTag: (profile: {
+    name: string
+    remoteSource?: boolean
+    ui_meta?: Record<string, { title?: string }>
+  }) =>
+    String(
+      profile.ui_meta?.['hermes-bots']?.title ||
+        (!profile.remoteSource && botMetaMock[profile.name]?.title) ||
+        (profile.name === 'default' ? 'hermes' : profile.name)
+    )
       .toLowerCase()
       .replace(/[^a-z0-9_-]+/g, '-')
       .replace(/^-+|-+$/g, ''),
@@ -133,6 +142,11 @@ async function pushAndSettle(times = 1) {
 beforeEach(() => {
   vi.useFakeTimers()
   vi.clearAllMocks()
+
+  for (const key of Object.keys(botMetaMock)) {
+    delete botMetaMock[key]
+  }
+
   hostMock.onEvent = vi.fn(() => vi.fn())
   hostMock.profileRoutes = vi.fn(async () => [route('a'), route('b')])
   hostMock.requestProfile = vi.fn(async () => ({}))
@@ -463,6 +477,28 @@ describe('the roster loop pushes the OTHER connections’ agents', () => {
 
     expect(pushedToA?.params.agents).toEqual([
       expect.objectContaining({ connection_id: 'b', handle: 'cos-bot', profile: 'default', title: 'CoS Bot' })
+    ])
+    stopBotRelay()
+  })
+
+  it('does not borrow local legacy metadata for an untitled remote default', async () => {
+    botMetaMock.default = { title: 'Local Custom' }
+
+    const calls = respondWith(call =>
+      call.method === 'profiles.list'
+        ? { profiles: [{ name: call.connectionId === 'a' ? 'ops' : 'default' }] }
+        : {}
+    )
+
+    const { startBotRelay, stopBotRelay } = await loadRelay()
+
+    startBotRelay()
+    await vi.advanceTimersByTimeAsync(0)
+
+    const pushedToA = calls.find(call => call.method === 'bot_relay.roster.sync' && call.connectionId === 'a')
+
+    expect(pushedToA?.params.agents).toEqual([
+      expect.objectContaining({ connection_id: 'b', handle: 'hermes', profile: 'default' })
     ])
     stopBotRelay()
   })

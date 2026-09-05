@@ -135,9 +135,10 @@ const RELAY_HANDLE_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/
 /** Prefer the same friendly title slug the mention picker inserts, but only
  * when it cannot collide with another row on this connection. The canonical
  * profile remains a resolver alias and the fallback for invalid titles. */
-function relayAgentHandle(profile: RosterRow, profiles: RosterRow[]): string {
+function relayAgentHandle(profile: RosterRow, profiles: RosterRow[], sourceIsRemote: boolean): string {
+  const mentionRow = sourceIsRemote ? { ...profile, remoteSource: true } : profile
   const canonical = botHandle(profile?.name, profile)
-  const friendly = botMentionTag(profile)
+  const friendly = botMentionTag(mentionRow)
 
   if (!RELAY_HANDLE_RE.test(friendly) || friendly === canonical) {
     return canonical
@@ -150,7 +151,9 @@ function relayAgentHandle(profile: RosterRow, profiles: RosterRow[]): string {
       return false
     }
 
-    return [other?.name, botHandle(other?.name, other), botMentionTag(other)].some(
+    const otherMentionRow = sourceIsRemote ? { ...other, remoteSource: true } : other
+
+    return [other?.name, botHandle(other?.name, other), botMentionTag(otherMentionRow)].some(
       form => String(form || '').toLowerCase() === normalized
     )
   })
@@ -273,7 +276,7 @@ async function relayAgentsOn(connection: RelayConnection): Promise<RelayAgentRow
     return profiles
       .map(profile => ({
         profile: String(profile?.name || ''),
-        handle: relayAgentHandle(profile, profiles),
+        handle: relayAgentHandle(profile, profiles, connection.route.mode === 'remote'),
         connection_id: connection.id,
         connection_label: label,
         title: String(profile?.ui_meta?.['hermes-bots']?.title || profile?.display_name || ''),
