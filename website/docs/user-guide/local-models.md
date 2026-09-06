@@ -114,7 +114,15 @@ local_runtime:
   backend: auto      # auto | cuda | metal | vulkan | hip | cpu
   tag: b10362        # pinned llama.cpp release; Hermes updates it with
                      # each release after re-validation
+  recover_wedged_models: false  # opt in to recycle a managed router child
+                                # after repeated, probe-confirmed HTTP 5xx errors
 ```
+
+`recover_wedged_models` applies only to the Hermes-managed endpoint. It
+does not restart or signal an external llama-server. Recovery is
+rate-limited per model: Hermes confirms the failure with a real inference
+request, asks the router to unload that model, and only signals the
+matching managed child if the unload fails.
 
 Models and runtime builds live under the Hermes home directory
 (`models/` and `runtimes/llamacpp/`). Selecting a local model as your

@@ -2307,6 +2307,9 @@ DEFAULT_CONFIG = {
         "backend": "auto",
         "models_max": 4,  # Router process: how many models may be resident at once.
         "port": 0,  # Port for the managed server. 0 = pick a free port at spawn.
+        # Confirm repeated HTTP 5xx responses with a real inference probe, then recycle only the
+        # affected managed-router child. Off by default while the recovery path is opt-in.
+        "recover_wedged_models": False,
         # Extra ports detection probes for an external llama-server (besides 8080).
         "detect_ports": [],
     },
