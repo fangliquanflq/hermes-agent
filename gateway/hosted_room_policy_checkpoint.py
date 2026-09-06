@@ -89,12 +89,21 @@ def _require_room(conn: sqlite3.Connection, room_id: str) -> None:
 
 def _settled_message(
     conn: sqlite3.Connection, room_id: str, discussion_event_id: str, message_event_id: Any) -> dict[str, Any] | None:
-    """Return the indexed member message a ``turn.settled`` event committed, if it is in the projection."""
+    """Return the member message committed by a ``turn.settled`` event."""
     rows = conn.execute(
         "SELECT seq, event_json FROM hosted_room_policy_events WHERE room_id=? AND discussion_event_id=?",
         (room_id, discussion_event_id)).fetchall()
-    return next(
+    indexed = next(
         (m for m in (json.loads(row["event_json"]) for row in rows) if m.get("event_id") == message_event_id), None)
+    if indexed is not None:
+        return indexed
+    row = conn.execute(
+        f"SELECT {_ROOM_EVENT_COLUMNS} FROM hosted_room_events WHERE room_id=? AND event_id=? AND kind='message.member'",
+        (room_id, message_event_id)).fetchone()
+    if row is None:
+        return None
+    message = _event_from_room_row(row)
+    return message if _text(message["payload"], "discussion_event_id") == discussion_event_id else None
 
 
 class HostedRoomPolicyCheckpoint:
@@ -200,11 +209,15 @@ class HostedRoomPolicyCheckpoint:
         """Index member messages and terminal turn outcomes of a known discussion."""
         room_id, seq, kind = str(event["room_id"]), int(event["seq"]), _text(event, "kind")
         thread_id, discussion_event_id = _text(payload, "thread_id"), _text(payload, "discussion_event_id")
-        if conn.execute(
+        active = conn.execute(
             "SELECT 1 FROM hosted_room_policy_events WHERE room_id=? AND discussion_event_id=? LIMIT 1",
+            (room_id, discussion_event_id)).fetchone()
+        if active is None and conn.execute(
+            "SELECT 1 FROM hosted_room_events WHERE room_id=? AND event_id=? AND kind='message.user'",
             (room_id, discussion_event_id)).fetchone() is None:
             return
-        self._store_active_event(conn, event=event, thread_id=thread_id, discussion_event_id=discussion_event_id)
+        if active is not None:
+            self._store_active_event(conn, event=event, thread_id=thread_id, discussion_event_id=discussion_event_id)
         if kind not in _TERMINAL_KINDS:
             return
         task_id = _text(payload, "task_id")
@@ -336,13 +349,19 @@ class HostedRoomPolicyCheckpoint:
     def events_for_task(self, *, room_id: str, source_event_seq: int) -> list[dict[str, Any]]:
         """Load one bounded discussion projection for terminal reconstruction."""
         with self._connect() as conn:
-            source = conn.execute(
-                "SELECT discussion_event_id, thread_id FROM hosted_room_policy_events WHERE room_id=? AND seq=?",
+            source_row = conn.execute(
+                f"SELECT {_ROOM_EVENT_COLUMNS} FROM hosted_room_events WHERE room_id=? AND seq=?",
                 (room_id, source_event_seq)).fetchone()
-            return [] if source is None else self._discussion_events(
-                conn, room_id=room_id, thread_id=str(source["thread_id"]),
-                discussion_event_id=str(source["discussion_event_id"]),
+            if source_row is None:
+                return []
+            source = _event_from_room_row(source_row)
+            thread_id = _text(source["payload"], "thread_id")
+            events = self._discussion_events(
+                conn, room_id=room_id, thread_id=thread_id,
+                discussion_event_id=_text(source, "event_id"),
                 bound_error="task policy projection exceeded its bound")
+            events_by_seq = {int(event["seq"]): event for event in (*events, source)}
+            return [events_by_seq[seq] for seq in sorted(events_by_seq)]
 
     def compact_completed(self, *, room_id: str) -> None:
         """Drop any completed projections left by an interrupted sync."""

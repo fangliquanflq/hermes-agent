@@ -799,6 +799,42 @@ def test_service_publishes_deferred_turn_continues_and_retries_new_generation(
         clock=clock,
     )
     assert retried.execution_generation == old_attempt.execution_generation + 1
+    driver.settle_task(
+        db,
+        retried,
+        settlement_id="retry-reply",
+        status="settled",
+        result={"text": "recovered retry reply"},
+        clock=clock,
+    )
+
+    service.prepare_room(binding)
+    events = service._events("room-1")
+    assert any(
+        event["kind"] == "message.member"
+        and event["payload"]["task_id"] == first["identity"].task_id
+        and event["payload"]["text"] == "recovered retry reply"
+        for event in events
+    )
+    assert service.policy_checkpoint.publication_exists(
+        room_id="room-1",
+        task_id=first["identity"].task_id,
+        status="settled",
+        execution_generation=retried.execution_generation,
+    )
+
+    followup = service.send(
+        room_id="room-1",
+        event_id="user-followup",
+        payload={"text": "Continue", "thread_id": "thread-1"},
+    )
+    assert followup["event_id"] == "user-followup"
+    snapshot = service._policy_snapshot(hosted_rooms.room_state(db, room_id="room-1"))
+    assert any(
+        event["kind"] == "message.member"
+        and event["payload"]["text"] == "recovered retry reply"
+        for event in snapshot.events
+    )
 
 
 def test_stop_fence_prevents_the_next_room_member_from_starting(
