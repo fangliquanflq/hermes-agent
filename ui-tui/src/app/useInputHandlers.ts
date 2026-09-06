@@ -35,6 +35,13 @@ const DASHBOARD_NEW_SESSION_MESSAGE = 'starting a fresh dashboard chat...'
 
 export const shouldAllowIdleHotkeyExit = (dashboardTuiMode = DASHBOARD_TUI_MODE) => !dashboardTuiMode
 
+export const isRedrawShortcut = (
+  key: { ctrl: boolean; meta: boolean; super?: boolean },
+  ch: string,
+  macHost = isMac
+): boolean =>
+  ch.toLowerCase() === 'l' && (key.ctrl || (macHost && (key.meta || key.super === true)))
+
 export function handleInputSelectionClipboard(
   selection: ReturnType<typeof getInputSelection>,
   action: 'copy' | 'cut'
@@ -674,7 +681,9 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       })
     }
 
-    if (isAction(key, ch, 'l')) {
+    // Keep raw Ctrl+L valid on macOS: the dashboard PTY registry writes 0x0c
+    // to request a full frame whenever an existing session is reattached.
+    if (isRedrawShortcut(key, ch)) {
       clearSelection()
       forceRedraw(terminal.stdout ?? process.stdout)
 

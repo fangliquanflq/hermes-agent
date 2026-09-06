@@ -5,6 +5,7 @@ import {
   applyVoiceRecordResponse,
   dismissSensitivePrompt,
   handleIdleHotkeyExit,
+  isRedrawShortcut,
   resolveCtrlCComposerAction,
   shouldAllowIdleHotkeyExit,
   shouldDetachEditedHistoryInput,
@@ -20,6 +21,16 @@ const baseKey = {
   wheelDown: false,
   wheelUp: false
 }
+
+describe('isRedrawShortcut', () => {
+  it('accepts the raw Ctrl+L byte used by dashboard PTY reattach on macOS', () => {
+    expect(isRedrawShortcut({ ctrl: true, meta: false }, 'l', true)).toBe(true)
+  })
+
+  it('does not consume an unmodified l', () => {
+    expect(isRedrawShortcut({ ctrl: false, meta: false }, 'l', true)).toBe(false)
+  })
+})
 
 describe('shouldFallThroughForScroll — keep transcript scrolling alive during prompt overlays', () => {
   it('falls through for wheel scrolls', () => {
