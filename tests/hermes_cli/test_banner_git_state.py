@@ -1,3 +1,4 @@
+import subprocess
 from unittest.mock import MagicMock, patch
 
 
@@ -55,7 +56,7 @@ def test_check_via_local_git_ssh_fastpath_ahead_not_behind(tmp_path):
     repo_dir = tmp_path / "repo"
     (repo_dir / ".git").mkdir(parents=True)
 
-    def fake_git_stdout(args, *, cwd, timeout=5):
+    def fake_git_stdout(args, *, cwd, timeout=5, network=False):
         if args == ["remote", "get-url", "origin"]:
             return "git@github.com:NousResearch/hermes-agent.git"
         if args == ["rev-parse", "HEAD"]:
@@ -82,7 +83,7 @@ def test_check_via_local_git_ssh_fastpath_genuinely_behind(tmp_path):
     repo_dir = tmp_path / "repo"
     (repo_dir / ".git").mkdir(parents=True)
 
-    def fake_git_stdout(args, *, cwd, timeout=5):
+    def fake_git_stdout(args, *, cwd, timeout=5, network=False):
         if args == ["remote", "get-url", "origin"]:
             return "git@github.com:NousResearch/hermes-agent.git"
         if args == ["rev-parse", "HEAD"]:
@@ -110,7 +111,7 @@ def test_check_via_local_git_ssh_fastpath_offline_keeps_sentinel(tmp_path):
     repo_dir = tmp_path / "repo"
     (repo_dir / ".git").mkdir(parents=True)
 
-    def fake_git_stdout(args, *, cwd, timeout=5):
+    def fake_git_stdout(args, *, cwd, timeout=5, network=False):
         if args == ["remote", "get-url", "origin"]:
             return "git@github.com:NousResearch/hermes-agent.git"
         if args == ["rev-parse", "HEAD"]:
@@ -126,3 +127,43 @@ def test_check_via_local_git_ssh_fastpath_offline_keeps_sentinel(tmp_path):
         behind = banner._check_via_local_git(repo_dir)
 
     assert behind == banner.UPDATE_AVAILABLE_NO_COUNT
+
+
+def test_check_via_local_git_resolves_origin_with_fetch_config(tmp_path, monkeypatch):
+    """Remote classification and fetch must see the same isolated git config."""
+    from hermes_cli import banner
+
+    repo_dir = tmp_path / "repo"
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "remote", "add", "origin",
+         "git@github.com:NousResearch/hermes-agent.git"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "-c", "user.name=Hermes Test",
+         "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "base"],
+        check=True,
+        capture_output=True,
+    )
+    global_config = tmp_path / "gitconfig"
+    subprocess.run(
+        ["git", "config", "--file", str(global_config),
+         "url.https://github.com/.insteadOf", "git@github.com:"],
+        check=True,
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
+    # Prove the ambient config rewrites the SSH remote to HTTPS. The startup
+    # check must nevertheless classify under the same isolated config as fetch.
+    assert banner._git_stdout(["remote", "get-url", "origin"], cwd=repo_dir).startswith("https://")
+    assert banner._git_stdout(
+        ["remote", "get-url", "origin"], cwd=repo_dir, network=True,
+    ).startswith("git@github.com:")
+    head = banner._git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
+    git_ok = MagicMock(return_value=False)
+    monkeypatch.setattr(banner, "_git_ok", git_ok)
+    monkeypatch.setattr(banner, "_upstream_main_sha", lambda: head)
+
+    assert banner._check_via_local_git(repo_dir) == 0
+    git_ok.assert_not_called()

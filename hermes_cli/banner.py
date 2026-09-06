@@ -165,23 +165,30 @@ def _git_run(args: list[str], *, cwd: Optional[Path] = None, timeout: int = 5, t
 
     git output is UTF-8; on Windows ``text=True`` defaults to the ANSI code page and a byte like the
     3rd of 🐛 in a commit subject crashes the stdlib reader thread (#52649), hence the explicit
-    encoding. ``network=True`` (ls-remote/fetch) detaches stdin and disables git/GCM prompts so a
-    passive update check can never hang on a ``Username for 'https://github.com':`` prompt.
+    encoding. ``network=True`` (ls-remote/fetch) disables git, GCM, and SSH prompts and uses
+    process-tree-aware timeout cleanup so passive update checks cannot hijack or outlive the CLI.
     """
-    kwargs: dict = {}
     if network:
-        from hermes_cli._subprocess_compat import noninteractive_git_env
-        kwargs = {"stdin": subprocess.DEVNULL, "env": noninteractive_git_env()}
+        from hermes_cli._subprocess_compat import bounded_probe_run, noninteractive_git_env
+
+        env = noninteractive_git_env()
+        # GIT_TERMINAL_PROMPT does not govern OpenSSH, which may open /dev/tty directly for host-key
+        # confirmation. Batch mode makes startup's passive network checks fail instead of prompting.
+        env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+        return bounded_probe_run(
+            ["git", *args], timeout=timeout, cwd=str(cwd) if cwd is not None else None,
+            env=env,
+        )
     try:
         return subprocess.run(
             ["git", *args], capture_output=True, timeout=timeout, cwd=str(cwd) if cwd is not None else None,
-            **(_GIT_TEXT_KW if text else {}), **kwargs)
+            **(_GIT_TEXT_KW if text else {}))
     except Exception:
         return None
 
 
-def _git_stdout(args: list[str], *, cwd: Path, timeout: int = 5) -> Optional[str]:
-    result = _git_run(args, cwd=cwd, timeout=timeout)
+def _git_stdout(args: list[str], *, cwd: Path, timeout: int = 5, network: bool = False) -> Optional[str]:
+    result = _git_run(args, cwd=cwd, timeout=timeout, network=network)
     if result is None or result.returncode != 0:
         return None
     return (result.stdout or "").strip()
@@ -262,7 +269,9 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
 
 def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     """Count commits behind origin/main in a local checkout."""
-    origin_url = _git_stdout(["remote", "get-url", "origin"], cwd=repo_dir)
+    # Resolve under the same isolated config as fetch. Otherwise a global ``insteadOf`` can make
+    # this look HTTPS while fetch sees the raw SSH URL and unexpectedly opens /dev/tty (#104591).
+    origin_url = _git_stdout(["remote", "get-url", "origin"], cwd=repo_dir, network=True)
     if _is_official_ssh_remote(origin_url):
         head_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
         if not head_rev:
