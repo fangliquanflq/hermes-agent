@@ -895,6 +895,40 @@ describe('room identity', () => {
 })
 
 describe('sync worker', () => {
+  it('retries when a stale writer replaces an acknowledged disband before read-back', async () => {
+    deferTimers()
+
+    const staleRoom = {
+      rooms: {
+        'name:Gone': {
+          log: [{ at: 1, from: { kind: 'user', name: 'You' }, id: 'old', text: 'stale' }],
+          revision: 1
+        }
+      },
+      version: 3
+    }
+
+    const room = await loadRoom({
+      overwriteAfterConfigureOnce: {
+        key: 'hermes-bots-groups',
+        value: staleRoom
+      }
+    })
+
+    room.gateway.uiMeta['hermes-bots-groups'] = staleRoom
+    room.gateway.uiMetaRevisions['hermes-bots-groups'] = 1
+
+    room.chat.scheduleGroupChatServerSync({}, { allowEmpty: true, deletedRooms: ['Gone'] })
+    await drain(() => room.gateway.rpcFor('profiles.configure').length < 2, 80)
+
+    const stored = room.gateway.uiMeta['hermes-bots-groups'] as NonNullable<SyncSnapshot>
+
+    expect(room.gateway.rpcFor('profiles.configure')).toHaveLength(2)
+    expect(stored.rooms['name:Gone']).toBeUndefined()
+    expect(stored.deleted?.['name:Gone']).toBeGreaterThan(0)
+    expect(room.chat.$groupChats.get().Gone).toBeUndefined()
+  })
+
   it('retries a gateway CAS conflict and publishes the merged room', async () => {
     deferTimers()
 

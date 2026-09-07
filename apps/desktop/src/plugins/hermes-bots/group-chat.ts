@@ -336,6 +336,25 @@ function groupChatSyncMemberKey(member: GroupMember) {
   return botRosterKey(member)
 }
 
+function groupChatSyncKeysFor(label: string, snapshot: GroupChatSyncSnapshot | null | undefined) {
+  const keys = new Set<string>()
+  const normalized = normalizeGroupChatSyncSnapshot(snapshot)
+
+  for (const [key, room] of Object.entries(normalized.rooms || {})) {
+    if (key === label || String(room?.name || '') === label || key === `name:${label}`) {
+      keys.add(key)
+    }
+  }
+
+  if (String(label).startsWith('id:') || String(label).startsWith('name:')) {
+    keys.add(label)
+  } else if (!keys.size) {
+    keys.add(`name:${label}`)
+  }
+
+  return keys
+}
+
 /** Merge two bounded projections without treating an absent room/message as
  *  deletion. Rooms are identified by durable room keys (id:<roomId> when the
  *  room carries one), so a rename is a same-key field update — never a
@@ -355,28 +374,10 @@ export function mergeGroupChatSyncSnapshots(
   const remoteNorm = normalizeGroupChatSyncSnapshot(remote)
   const localNorm = normalizeGroupChatSyncSnapshot(local)
 
-  const keysFor = (label: string, norm: GroupChatSyncSnapshot) => {
-    const keys = new Set<string>()
-
-    for (const [key, room] of Object.entries(norm.rooms || {})) {
-      if (key === label || String(room?.name || '') === label || key === `name:${label}`) {
-        keys.add(key)
-      }
-    }
-
-    if (String(label).startsWith('id:') || String(label).startsWith('name:')) {
-      keys.add(label)
-    } else if (!keys.size) {
-      keys.add(`name:${label}`)
-    }
-
-    return keys
-  }
-
   const changed = new Set<string>()
 
   for (const label of changedRooms) {
-    for (const key of keysFor(label, localNorm)) {
+    for (const key of groupChatSyncKeysFor(label, localNorm)) {
       changed.add(key)
     }
   }
@@ -390,7 +391,10 @@ export function mergeGroupChatSyncSnapshots(
   }
 
   for (const label of deletedRooms) {
-    for (const key of new Set([...keysFor(label, remoteNorm), ...keysFor(label, localNorm)])) {
+    for (const key of new Set([
+      ...groupChatSyncKeysFor(label, remoteNorm),
+      ...groupChatSyncKeysFor(label, localNorm)
+    ])) {
       // Rename passes changedRooms:[newName] + deletedRooms:[oldName]. For an
       // id-keyed room both labels resolve to the SAME durable key (the remote
       // copy still carries the old display name), and id tombstones are
@@ -965,6 +969,13 @@ async function flushGroupChatServerSync(connectionId?: string) {
       writeRevision
     })
 
+    const expectedDeletedKeys = new Set(
+      (job.deletedRooms || []).flatMap(label => [
+        ...groupChatSyncKeysFor(label, remoteState.snapshot),
+        ...groupChatSyncKeysFor(label, local)
+      ])
+    )
+
     // Reconnect/startup reconciliation often discovers that the gateway
     // already holds the exact merged projection. Avoid advancing a revision
     // merely because a view reopened.
@@ -1026,6 +1037,20 @@ async function flushGroupChatServerSync(connectionId?: string) {
 
     if (remoteState.supportsCas && confirmedState.revision < writeRevision) {
       throw new Error('Group chat ui_meta revision missing after read-back')
+    }
+
+    const confirmedSnapshot = normalizeGroupChatSyncSnapshot(confirmedState.snapshot)
+
+    for (const key of expectedDeletedKeys) {
+      const expectedRevision = Number(snapshot.deleted?.[key] || 0)
+      const confirmedRevision = Number(confirmedSnapshot.deleted?.[key] || 0)
+
+      // A successful configure is not sufficient: a stale peer can overwrite
+      // it at a higher CAS revision before this read-back. Keep the local room
+      // deleted and retry until this gateway actually retains the tombstone.
+      if (!expectedRevision || confirmedRevision < expectedRevision || confirmedSnapshot.rooms?.[key]) {
+        throw new Error('Group chat deletion tombstone missing after read-back')
+      }
     }
 
     if (confirmedState.snapshot) {

@@ -90,6 +90,9 @@ export interface GatewayOptions {
    *  `profiles.configure`, then reject it as a CAS conflict — the race the
    *  sync worker's pull-merge-retry exists for. */
   conflictOnce?: { key: string; value: unknown }
+  /** Accept the first configure, then let a stale writer replace that key
+   *  before the caller's read-back. */
+  overwriteAfterConfigureOnce?: { key: string; value: unknown }
   /** Reject every prompt.submit with this — a fatal, non-recoverable failure. */
   failEverySubmitWith?: unknown
   /** Reject only the FIRST prompt.submit — the 4001 reap the retry recovers. */
@@ -152,6 +155,7 @@ export function createGroupGateway(options: GatewayOptions = {}): ScriptedGatewa
   let refcount = 0
   let disposals = 0
   let conflicted = false
+  let overwritten = false
 
   const resolveSession = (profile: unknown, target: unknown) => {
     const key = String(target ?? '')
@@ -211,7 +215,16 @@ export function createGroupGateway(options: GatewayOptions = {}): ScriptedGatewa
         uiMetaRevisions[key] = (uiMetaRevisions[key] || 0) + 1
       }
 
-      return { applied: { ui_meta: true, ui_meta_revisions: { ...uiMetaRevisions } } }
+      const appliedRevisions = { ...uiMetaRevisions }
+
+      if (options.overwriteAfterConfigureOnce && !overwritten) {
+        overwritten = true
+        const { key, value } = options.overwriteAfterConfigureOnce
+        uiMeta[key] = value
+        uiMetaRevisions[key] = (uiMetaRevisions[key] || 0) + 1
+      }
+
+      return { applied: { ui_meta: true, ui_meta_revisions: appliedRevisions } }
     }
 
     if (method === 'session.create') {
