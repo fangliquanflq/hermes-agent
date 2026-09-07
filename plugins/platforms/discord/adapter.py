@@ -5542,7 +5542,9 @@ class DiscordAdapter(BasePlatformAdapter):
             embed.add_field(name="Reason", value=reason_display, inline=False)
             require_admin, admin_user_ids = _resolve_exec_approval_admin_gate(getattr(self.config, "extra", None))
             view = ExecApprovalView(
-                session_key=session_key, allowed_user_ids=self._allowed_user_ids,
+                session_key=session_key,
+                request_id=(metadata or {}).get("_approval_request_id"),
+                allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids, require_admin=require_admin,
                 admin_user_ids=admin_user_ids, allow_permanent=allow_permanent,
                 allow_session=allow_session, smart_denied=smart_denied,
@@ -6321,9 +6323,11 @@ def _define_discord_view_classes() -> None:
             self, session_key: str, allowed_user_ids: set, allowed_role_ids: Optional[set] = None,
             require_admin: bool = False, admin_user_ids: Optional[set] = None,
             allow_permanent: bool = True, allow_session: bool = True, smart_denied: bool = False,
+            request_id: Optional[str] = None,
         ):
             super().__init__(allowed_user_ids, allowed_role_ids, timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
+            self.request_id = str(request_id or "")
             self.require_admin = require_admin
             self.admin_user_ids = {str(a).strip() for a in (admin_user_ids or set()) if str(a).strip()}
             if smart_denied or not allow_session:
@@ -6368,7 +6372,10 @@ def _define_discord_view_classes() -> None:
             # wait timed out (count == 0) must not claim "Approved".
             try:
                 from tools.approval import resolve_gateway_approval
-                count = resolve_gateway_approval(self.session_key, choice)
+                count = (
+                    resolve_gateway_approval(self.session_key, choice, request_id=self.request_id)
+                    if self.request_id else 0
+                )
                 logger.info(
                     "Discord button resolved %d approval(s) for session %s (choice=%s, user=%s)",
                     count, self.session_key, choice, interaction.user.display_name,

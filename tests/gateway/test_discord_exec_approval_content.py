@@ -33,10 +33,12 @@ async def test_exec_approval_prompt_uses_visible_content_with_command_and_reason
         command=command,
         session_key="discord:555",
         description="script execution via -c flag",
+        metadata={"_approval_request_id": "request-555"},
     )
 
     assert result.success is True
     assert sent["view"] is not None
+    assert sent["view"].request_id == "request-555"
     assert sent["embed"] is not None
 
     prompt_text = sent["content"]
