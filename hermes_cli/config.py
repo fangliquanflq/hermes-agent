@@ -1227,6 +1227,17 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
 
     issues: List[ConfigIssue] = []
     _validate_voice(config, issues)
+    command_allowlist = config.get("command_allowlist")
+    if "command_allowlist" in config and not (
+        isinstance(command_allowlist, list)
+        and all(isinstance(pattern, str) for pattern in command_allowlist)
+    ):
+        _issue(
+            issues,
+            "error",
+            "command_allowlist must be a YAML list of strings",
+            "Run 'hermes config migrate' to recover a legacy stringified list, or set it to []",
+        )
     cp = config.get("custom_providers")
     fb = config.get("fallback_model")
     for value, validator in ((cp, _validate_custom_providers), (fb, _validate_fallback_model)):

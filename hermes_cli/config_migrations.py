@@ -13,6 +13,8 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from utils import fast_safe_load
+
 #: Auto-migration support floor. Configs whose on-disk ``_config_version`` is below this are NOT
 #: auto-migrated (v12 predates ~two years of releases; carrying the sub-v12 steps and the env
 #: bridges they consumed forever is not worth it). Below-floor configs are left byte-for-byte
@@ -542,6 +544,35 @@ def _migrate_to_41(results: Dict[str, Any], quiet: bool) -> None:
                   f"({', '.join(cleaned)}) — Bot Chat sessions now get the live roster instead.")
 
 
+def _migrate_to_42(results: Dict[str, Any], quiet: bool) -> None:
+    # 41 → 42: pre-#88163 `config set` could persist a JSON/YAML list literal as one string.
+    # Recover only an unambiguous list[str]; every other scalar becomes an empty, fail-closed list.
+    config = read_raw_config()
+    raw_allowlist = config.get("command_allowlist")
+    if not isinstance(raw_allowlist, str):
+        return
+
+    try:
+        parsed = fast_safe_load(raw_allowlist)
+    except Exception:
+        parsed = None
+    recovered = (
+        parsed
+        if isinstance(parsed, list) and all(isinstance(pattern, str) for pattern in parsed)
+        else []
+    )
+    config["command_allowlist"] = recovered
+    _persist_migration(config)
+
+    if recovered:
+        message = f"Migrated legacy stringified command_allowlist ({len(recovered)} entries)"
+    else:
+        message = "Invalid string command_allowlist was ignored and reset to []"
+    results["warnings"].append(message)
+    if not quiet:
+        print(f"  ⚠ {message}")
+
+
 #: Registry of (target_version, step), strictly ascending; simple default-flip steps are
 #: declared inline via _rewrite_stale_default / _rewrite_key partials. Later steps observe
 #: earlier steps' writes via read_raw_config() (filesystem state). v12 is the support floor:
@@ -627,6 +658,7 @@ MIGRATIONS: Tuple[Tuple[int, Callable[[Dict[str, Any], bool], None]], ...] = (
         message="  ✓ Model catalog now refreshes every 20 minutes (model_catalog.ttl_minutes)",
         extra_guard=lambda raw: "ttl_minutes" not in raw)),
     (41, _migrate_to_41),
+    (42, _migrate_to_42),
 )
 
 

@@ -330,7 +330,17 @@ def load_permanent_allowlist() -> set:
     try:
         from hermes_cli.config import load_config_readonly
         config = load_config_readonly()
-        patterns = set(config.get("command_allowlist", []) or [])
+        raw_patterns = config.get("command_allowlist", [])
+        if not (
+            isinstance(raw_patterns, list)
+            and all(isinstance(pattern, str) for pattern in raw_patterns)
+        ):
+            logger.warning(
+                "Ignoring invalid command_allowlist: expected a list of strings, got %s",
+                type(raw_patterns).__name__,
+            )
+            return set()
+        patterns = set(raw_patterns)
         if patterns:
             load_permanent(patterns)
         return patterns
