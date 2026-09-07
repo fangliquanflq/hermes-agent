@@ -260,6 +260,47 @@ class TestStreamingAccumulator:
         assert call_kwargs["stream"] is True
         assert "stream_options" not in call_kwargs
 
+    @pytest.mark.parametrize(
+        ("model", "expects_stream_options"),
+        [
+            ("google/gemini-3-flash-preview", False),
+            ("anthropic/claude-sonnet-4.6", True),
+        ],
+    )
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_relayed_model_stream_options_follow_target_family(
+        self, mock_close, mock_create, model, expects_stream_options
+    ):
+        """Strict relays need Gemini detection without losing usage for other models."""
+        from run_agent import AIAgent
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter([
+            _make_stream_chunk(content="ok", finish_reason="stop", model=model),
+        ])
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://aggregator.example/v1",
+            model=model,
+            provider="custom:aggregator",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({"model": model})
+
+        assert response.choices[0].message.content == "ok"
+        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+        assert ("stream_options" in call_kwargs) is expects_stream_options
+        if expects_stream_options:
+            assert call_kwargs["stream_options"] == {"include_usage": True}
+
 
 
     @patch("run_agent.AIAgent._create_request_openai_client")

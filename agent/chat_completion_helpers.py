@@ -2680,8 +2680,10 @@ class _StreamingCall(StreamingWaitMonitor):
         return usage, finish_reason
 
     def _open_chat_stream(self, stream_kwargs: dict[str, Any]):
-        # Native Gemini rejects OpenAI's usage-streaming extension.
-        if not is_native_gemini_base_url(self.agent.base_url):
+        # Gemini rejects OpenAI's usage-streaming extension even when an
+        # OpenAI-compatible aggregator relays the model under another host.
+        target_model = str(stream_kwargs.get("model") or self.agent.model or "").lower()
+        if "gemini" not in target_model and not is_native_gemini_base_url(self.agent.base_url):
             stream_kwargs["stream_options"] = {"include_usage": True}
         request_client = self._attempt_request_client = self.clients.set_client(
             self.agent._create_request_openai_client(reason="chat_completion_stream_request", api_kwargs=stream_kwargs))
