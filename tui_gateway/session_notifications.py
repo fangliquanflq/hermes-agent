@@ -90,6 +90,36 @@ def _notification_event_requires_owner(evt: dict) -> bool:
     return evt.get("type") == "async_delegation" or bool(evt.get("origin_ui_session_id") or evt.get("session_key"))
 
 
+def _notification_event_target(sid: str, session: dict, evt: dict) -> tuple[str, dict]:
+    """Resolve an addressed event to its live owner so any poller can deliver it.
+
+    Every live session has a poller but they share one process-global queue. Requeueing an
+    event whenever a foreign poller wins makes delivery depend on the owning thread winning
+    a later queue race. Route directly instead; exact UI ownership wins, then a compression
+    continuation, then the original durable key. Unowned events still flow through the
+    current session's fail-closed ownership gate.
+    """
+    if not _notification_event_requires_owner(evt):
+        return sid, session
+    with _sessions_lock:
+        live = [(owner_sid, owner) for owner_sid, owner in _sessions.items()
+                if not owner.get("_finalized")]
+    origin_sid = str(evt.get("origin_ui_session_id") or "")
+    if origin_sid:
+        for owner_sid, owner in live:
+            if owner_sid == origin_sid:
+                return owner_sid, owner
+    evt_key = str(evt.get("session_key") or "")
+    resolved_key = _notif_resolve_event_key(evt_key) if evt_key else ""
+    for key in dict.fromkeys((resolved_key, evt_key)):
+        if not key:
+            continue
+        for owner_sid, owner in live:
+            if key in _notif_current_keys(owner_sid, owner):
+                return owner_sid, owner
+    return sid, session
+
+
 # Extra dedup fields per event type. Completions are terminal (one-shot per process session); watch events are not —
 # one process can match patterns many times, so their content is part of the key.
 _DEDUP_EXTRA_FIELDS = {
@@ -413,9 +443,13 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
     from tools.process_registry import process_registry
     from tools.process_registry_notifications import format_process_notification
     queue = process_registry.completion_queue
-    emitted: set = set()  # dedup re-queued events so one completion isn't emitted 50 times while busy
-    handle = lambda evt, deferred: _notif_handle_event(  # noqa: E731
-        sid, session, evt, emitted, process_registry, format_process_notification, deferred)
+    session.setdefault("_notification_emitted", set())
+
+    def handle(evt, deferred):
+        target_sid, target = _notification_event_target(sid, session, evt)
+        emitted = target.setdefault("_notification_emitted", set())
+        return _notif_handle_event(
+            target_sid, target, evt, emitted, process_registry, format_process_notification, deferred)
     last_kanban_poll = last_loop_poll = 0.0
     while not stop_event.is_set() and not session.get("_finalized"):
         now = time.monotonic()
