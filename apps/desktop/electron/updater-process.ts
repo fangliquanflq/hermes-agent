@@ -1,5 +1,5 @@
 import { spawn, type SpawnOptions } from 'node:child_process'
-import { statSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 
 import { hiddenWindowsChildOptions } from './windows-child-options'
@@ -12,6 +12,7 @@ export interface UpdaterChild {
 export interface ResolveUpdateScriptHandoffDeps {
   isWindows?: boolean
   fileExists?: (candidate: string) => boolean
+  readFileText?: (candidate: string) => string | null
 }
 
 export interface UpdateScriptHandoff {
@@ -48,24 +49,35 @@ export function resolveUpdateScriptHandoff(
   }
 
   const exists = deps.fileExists ?? stagedFileExists
+  const readText = deps.readFileText ?? stagedFileText
+  const maintained = path.join(updateRoot, 'scripts', 'desktop-update', 'windows.ps1')
+  const legacy = path.join(updateRoot, 'scripts', 'desktop-update.ps1')
 
   // Current layout first, then the pre-reorg flat path — an updated asar can
-  // meet a checkout from either side of the move (the checkout also ships a
-  // forwarder at the legacy path for the inverse skew).
-  for (const candidate of [
-    path.join(updateRoot, 'scripts', 'desktop-update', 'windows.ps1'),
-    path.join(updateRoot, 'scripts', 'desktop-update.ps1')
-  ]) {
-    if (exists(candidate)) {
-      return {
+  // meet a checkout from either side of the move. Current checkouts also ship
+  // a flat forwarder for inverse skew, however, and that file can survive when
+  // antivirus removes its maintained target. Reject the known forwarder so the
+  // caller keeps the working app alive or chooses the staged updater instead.
+  let candidate: string | null = null
+
+  if (exists(maintained) && readText(maintained) !== null) {
+    candidate = maintained
+  } else if (exists(legacy)) {
+    const legacyText = readText(legacy)
+    const forwardsToMaintained = legacyText?.includes('desktop-update\\windows.ps1') ?? true
+
+    if (!forwardsToMaintained) {
+      candidate = legacy
+    }
+  }
+
+  return candidate
+    ? {
         command: 'powershell',
         args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', candidate],
         scriptPath: candidate
       }
-    }
-  }
-
-  return null
+    : null
 }
 
 /**
@@ -210,6 +222,14 @@ function stagedFileExists(candidate: string): boolean {
     return statSync(candidate).isFile()
   } catch {
     return false
+  }
+}
+
+function stagedFileText(candidate: string): string | null {
+  try {
+    return readFileSync(candidate, 'utf8')
+  } catch {
+    return null
   }
 }
 

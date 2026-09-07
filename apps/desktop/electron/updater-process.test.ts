@@ -178,7 +178,8 @@ test('resolveUpdateScriptHandoff prefers the repo script on Windows when present
 
   const handoff = resolveUpdateScriptHandoff(root, {
     isWindows: true,
-    fileExists: candidate => candidate === expected
+    fileExists: candidate => candidate === expected,
+    readFileText: () => '# maintained updater'
   })
 
   assert.ok(handoff)
@@ -193,11 +194,38 @@ test('resolveUpdateScriptHandoff falls back to the pre-reorg flat path', () => {
 
   const handoff = resolveUpdateScriptHandoff(root, {
     isWindows: true,
-    fileExists: candidate => candidate === legacy
+    fileExists: candidate => candidate === legacy,
+    readFileText: () => '# standalone legacy updater\nWrite-Host "updating"'
   })
 
   assert.ok(handoff)
   assert.equal(handoff.scriptPath, legacy)
+})
+
+test('resolveUpdateScriptHandoff rejects a surviving forwarder whose maintained target is missing', () => {
+  const root = String.raw`C:\Users\hermes\AppData\Local\hermes\hermes-agent`
+  const legacy = path.join(root, 'scripts', 'desktop-update.ps1')
+
+  const handoff = resolveUpdateScriptHandoff(root, {
+    isWindows: true,
+    fileExists: candidate => candidate === legacy,
+    readFileText: () => '& (Join-Path $PSScriptRoot "desktop-update\\windows.ps1") @args'
+  })
+
+  assert.equal(handoff, null)
+})
+
+test('resolveUpdateScriptHandoff fails closed when the only legacy entrypoint is unreadable', () => {
+  const root = String.raw`C:\Users\hermes\AppData\Local\hermes\hermes-agent`
+  const legacy = path.join(root, 'scripts', 'desktop-update.ps1')
+
+  const handoff = resolveUpdateScriptHandoff(root, {
+    isWindows: true,
+    fileExists: candidate => candidate === legacy,
+    readFileText: () => null
+  })
+
+  assert.equal(handoff, null)
 })
 
 test('resolveUpdateScriptHandoff returns null when the checkout predates the script', () => {
@@ -224,7 +252,8 @@ test('wrapHandoffForDetachedConsole routes through cmd start with own console', 
 
   const handoff = resolveUpdateScriptHandoff(root, {
     isWindows: true,
-    fileExists: candidate => candidate === expected
+    fileExists: candidate => candidate === expected,
+    readFileText: () => '# maintained updater'
   })
 
   assert.ok(handoff)

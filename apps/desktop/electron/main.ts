@@ -4157,6 +4157,19 @@ async function applyUpdates(opts: { stopSafeBlockers?: boolean } = {}) {
     const scriptHandoff = resolveUpdateScriptHandoff(updateRoot)
     let child
 
+    if (!scriptHandoff && !updater) {
+      const message =
+        'Update aborted: the Windows updater entrypoint is missing or unreadable. ' +
+        'Hermes will keep running — restore the quarantined file or run the Hermes installer to repair it.'
+
+      rememberLog('[updates] updater entrypoint disappeared after preflight; aborting quit')
+      emitUpdateProgress({ stage: 'error', message, percent: null })
+      startHermes().catch(() => {})
+      startGatewaysAfterUpdateAbort(venvHermesShimPath(updateRoot))
+
+      return { ok: false, error: 'updater-entrypoint-missing', message }
+    }
+
     if (scriptHandoff) {
       const updateStartedAt = Math.floor(Date.now() / 1000)
 

@@ -50,10 +50,11 @@ param(
     [switch]$NoMarkerCleanup,
     [switch]$SelfTestUi,
     [switch]$SelfTestPipeDrain,
-    [switch]$SelfTestMarker
+    [switch]$SelfTestMarker,
+    [switch]$SelfTestCompletion
 )
 
-if (-not $SelfTestUi -and -not $SelfTestPipeDrain -and -not $InstallRoot) {
+if (-not $SelfTestUi -and -not $SelfTestPipeDrain -and -not $SelfTestCompletion -and -not $InstallRoot) {
     # Mandatory in spirit; relaxed in the signature only so the self-test
     # switches can drive the UI / the pipe drain without a checkout.
     throw "-InstallRoot is required"
@@ -1178,9 +1179,53 @@ function Invoke-HermesStep([string]$Exe, [string[]]$HermesArgs, [string]$Tag) {
     return @{ Code = $code; Output = $all; TreeQuiesced = (-not $stalled -or $proc.HasExited); StartedAfterJobAssignment = $true }
 }
 
+function Get-CompletionOutcome(
+    [int]$UpdateCode,
+    [bool]$RuntimeAvailable,
+    [Nullable[int]]$DesktopVerificationCode
+) {
+    if ($UpdateCode -ne 0) {
+        return @{
+            Code = $UpdateCode
+            Message = "Update failed (exit $UpdateCode). Run `hermes debug share` in a terminal to send a report."
+        }
+    }
+    if (-not $RuntimeAvailable -or $null -eq $DesktopVerificationCode) {
+        return @{
+            Code = 8
+            Message = "Hermes code was updated, but the managed Python runtime is missing or could not start. Run the Hermes installer to repair the runtime, then run `hermes desktop --force-build`."
+        }
+    }
+    if ($DesktopVerificationCode -ne 0) {
+        return @{
+            Code = 6
+            Message = "Code and dependencies updated, but Desktop verification failed (exit $DesktopVerificationCode). Run `hermes desktop --force-build` from a terminal to repair the app."
+        }
+    }
+    return @{ Code = 0; Message = "Update complete." }
+}
+
 $finalCode = 1
 $finalMsg = "update did not complete"
 $script:TreeSafeToFinalize = $true
+
+if ($SelfTestCompletion) {
+    $cases = @(
+        @{ Name = "update failure"; Update = 9; Runtime = $true; Desktop = [Nullable[int]]0; Want = 9 },
+        @{ Name = "missing runtime"; Update = 0; Runtime = $false; Desktop = $null; Want = 8 },
+        @{ Name = "desktop verification failure"; Update = 0; Runtime = $true; Desktop = [Nullable[int]]5; Want = 6 },
+        @{ Name = "verified completion"; Update = 0; Runtime = $true; Desktop = [Nullable[int]]0; Want = 0 }
+    )
+    foreach ($case in $cases) {
+        $outcome = Get-CompletionOutcome $case.Update $case.Runtime $case.Desktop
+        if ($outcome.Code -ne $case.Want) {
+            Write-Host "COMPLETION SELF-TEST: FAIL $($case.Name): got $($outcome.Code), expected $($case.Want)"
+            exit 1
+        }
+    }
+    Write-Host "COMPLETION SELF-TEST: PASS"
+    exit 0
+}
 
 # ── -SelfTestUi: drive the shim to both terminal states, no update ─────────
 # Manual QA for the Edge shell without a checkout or a real update. Exits
@@ -1581,30 +1626,36 @@ try {
         Write-HandoffLog "retry exit code: $($res.Code)"
     }
 
-    # -- 4. Truthful completion: don't trust exit 0 -------------------------
-    # `hermes update` treats a Desktop GUI build failure as NON-fatal (prints
-    # a one-line warning, exits 0). For a Desktop-DRIVEN update that warning
-    # is fatal: we would relaunch the old exe and call it success. Detect it,
-    # retry the build once, and propagate honestly.
-    $desktopBuildFailed = $false
-    if ($res.Code -eq 0 -and $res.Output -match "Desktop build failed") {
-        Write-HandoffLog "hermes update reported a desktop build failure (non-fatal there, fatal here); retrying build"
-        Publish-UiProgress "Rebuilding Desktop"
-        $rebuild = Invoke-HermesStep $pythonExe @("-m", "hermes_cli.main", "desktop", "--force-build", "--build-only") "rebuild"
-        Write-HandoffLog "desktop rebuild exit code: $($rebuild.Code)"
-        if ($rebuild.Code -ne 0) { $desktopBuildFailed = $true }
+    # -- 4. Truthful completion: prove every success postcondition -----------
+    # Exit 0 only describes the child that was already mapped in memory. An
+    # antivirus can remove its on-disk python.exe while that child finishes,
+    # and the update command historically treated Desktop build failure as
+    # non-fatal. Start the managed runtime again and run the Desktop's own
+    # build-only gate: it validates imports/install state, the content stamp,
+    # and a launchable packaged artifact, rebuilding when stale or missing.
+    $desktopVerificationCode = $null
+    $runtimeAvailable = Test-Path -LiteralPath $pythonExe
+    if ($res.Code -eq 0 -and $runtimeAvailable) {
+        $verifyArgs = @("-m", "hermes_cli.main", "desktop", "--build-only")
+        if ($res.Output -match "Desktop build failed") {
+            $verifyArgs += "--force-build"
+        }
+        Publish-UiProgress "Verifying Desktop"
+        try {
+            $verification = Invoke-HermesStep $pythonExe $verifyArgs "verify"
+            $desktopVerificationCode = [int]$verification.Code
+            Write-HandoffLog "desktop verification exit code: $desktopVerificationCode"
+        } catch {
+            Write-HandoffLog "desktop verification could not start: $($_.Exception.Message)"
+        }
+        # A running image can survive removal of its file, so probe again after
+        # the verification child exits instead of trusting that it once started.
+        $runtimeAvailable = Test-Path -LiteralPath $pythonExe
     }
 
-    if ($res.Code -eq 0 -and -not $desktopBuildFailed) {
-        $finalCode = 0
-        $finalMsg = "Update complete."
-    } elseif ($desktopBuildFailed) {
-        $finalCode = 6
-        $finalMsg = "Code and dependencies updated, but the Desktop app REBUILD FAILED - you are running the previous build. Run `hermes desktop --force-build` from a terminal to retry."
-    } else {
-        $finalCode = $res.Code
-        $finalMsg = "Update failed (exit $($res.Code)). Run `hermes debug share` in a terminal to send a report."
-    }
+    $outcome = Get-CompletionOutcome $res.Code $runtimeAvailable $desktopVerificationCode
+    $finalCode = $outcome.Code
+    $finalMsg = $outcome.Message
     exit $finalCode
 } finally {
     # Truth ordering (sibling contract to posix.sh finish()):

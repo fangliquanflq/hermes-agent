@@ -88,11 +88,8 @@ def test_update_invocation_uses_module_entrypoint() -> None:
         "so the inherited image handle lands on python.exe, which uv never has "
         "to replace."
     )
-    assert (
-        '@("-m", "hermes_cli.main", "desktop", "--force-build", "--build-only")'
-        in source
-    ), (
-        "The desktop rebuild step must also go through "
+    assert '@("-m", "hermes_cli.main", "desktop", "--build-only")' in source, (
+        "The desktop verification step must also go through "
         "`python.exe -m hermes_cli.main desktop ...` for the same reason."
     )
 
