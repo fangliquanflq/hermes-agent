@@ -379,19 +379,63 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
         _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(batch), "kanban notification dispatch failed")
 
 
-def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None:
-    """Run the claimed (running=True) agent turn for one notification event."""
+def _notif_dispatch_events(
+    sid: str, session: dict, notifications: list[tuple[dict, str]], consumer: str = "tui-poller",
+) -> None:
+    """Run one claimed agent turn for one event or a ready process-completion batch."""
     from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
-    if (claim := claim_event_delivery(evt, "tui-poller")) is None:
+
+    claimed = []
+    for evt, text in notifications:
+        if (claim := claim_event_delivery(evt, consumer)) is not None:
+            claimed.append((evt, text, claim))
+    if not claimed:
+        _notif_release_turn(session)
         return
-    kwargs = ({"display_kind": "async_delegation_complete", "display_metadata": _async_delegation_display_metadata(evt)}
-              if evt.get("type") == "async_delegation" else {})
+    only_evt = claimed[0][0] if len(claimed) == 1 else None
+    kwargs = ({"display_kind": "async_delegation_complete", "display_metadata": _async_delegation_display_metadata(only_evt)}
+              if only_evt is not None and only_evt.get("type") == "async_delegation" else {})
     try:
-        _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text, "notification poller dispatch failed", **kwargs)
+        _notif_submit(
+            f"__notif__{int(time.time() * 1000)}", sid, session,
+            "\n\n".join(text for _evt, text, _claim in claimed),
+            "notification poller dispatch failed", **kwargs)
     except Exception:
-        release_event_delivery(evt, claim)
+        for evt, _text, claim in claimed:
+            release_event_delivery(evt, claim)
         return
-    complete_event_delivery(evt, claim)
+    for evt, _text, claim in claimed:
+        complete_event_delivery(evt, claim)
+
+
+def _notif_collect_ready_completions(sid, session, first, emitted, registry, fmt):
+    """Take the contiguous ready completion backlog for this session without crossing another event kind/owner."""
+    notifications = [first]
+    queue = registry.completion_queue
+    while True:
+        try:
+            evt = queue.get_nowait()
+        except Exception:
+            break
+        if evt.get("type", "completion") != "completion" or _notification_event_belongs_elsewhere(sid, session, evt):
+            queue.put(evt)
+            break
+        if _notification_event_requires_owner(evt) and not _session_owns_notification_event(sid, session, evt):
+            logger.debug(
+                "Dropping unowned completion notification (origin=%r key=%r) instead of delivering to session %s",
+                str(evt.get("origin_ui_session_id") or ""), str(evt.get("session_key") or ""), sid)
+            continue
+        if registry.is_completion_consumed(evt.get("session_id", "")):
+            continue
+        text = fmt(evt)
+        if not text:
+            continue
+        dedup_key = _notification_event_dedup_key(evt)
+        if dedup_key not in emitted:
+            _emit("status.update", sid, {"kind": "process", "text": text})
+            emitted.add(dedup_key)
+        notifications.append((evt, text))
+    return notifications
 
 
 def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred) -> bool:
@@ -436,7 +480,11 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred) -> 
             return False
         time.sleep(0.25)  # back off: the re-queued event keeps the queue non-empty, else this loop spins at 100% CPU
         return True
-    _notif_dispatch_event(sid, session, evt, text)
+    notifications = (
+        _notif_collect_ready_completions(sid, session, (evt, text), emitted, registry, fmt)
+        if evt_type == "completion" else [(evt, text)]
+    )
+    _notif_dispatch_events(sid, session, notifications)
     return True
 
 

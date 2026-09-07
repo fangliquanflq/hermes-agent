@@ -7517,7 +7517,7 @@ def test_run_prompt_submit_delivers_completion_observed_by_poll(monkeypatch, tmp
         process_registry._poll_observed.discard(event["session_id"])
 
 
-def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_threading(
+def test_run_prompt_submit_batches_ready_completions_with_real_threading(
     monkeypatch, tmp_path
 ):
     import queue as _queue_mod
@@ -7547,7 +7547,9 @@ def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_thread
                     raise TimeoutError("notification turn was not released")
             return {"final_response": "", "messages": []}
 
-    monkeypatch.setattr(server.threading, "Thread", _recording_thread)
+    threading_proxy = types.SimpleNamespace(**vars(threading))
+    threading_proxy.Thread = _recording_thread
+    monkeypatch.setattr(server, "threading", threading_proxy)
     session = _session(
         session_key="session-a",
         agent=_BlockingNotificationAgent(turns),
@@ -7573,29 +7575,12 @@ def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_thread
     try:
         server._run_prompt_submit("rid-a", "sid_a", session, "session-a-turn")
 
-        assert nested_started.wait(timeout=5)
+        assert nested_started.wait(timeout=15)
         threads[0].join(timeout=5)
         assert not threads[0].is_alive()
-        # Membership, not order: the completion_queue is process-global, and
-        # notification pollers leaked by earlier session.init tests in this
-        # file legitimately steal-and-requeue foreign-session events (see
-        # _notification_poller_loop's belongs-elsewhere branch), rotating the
-        # queue. The requeue contract is that batch_2 and batch_3 both remain
-        # queued (never consumed) while batch_1's turn is in flight — so drain
-        # with a deadline (an event may be transiently held by a poller
-        # mid-cycle) and assert exactly {batch_2, batch_3} come back.
-        queued: dict = {}
-        deadline = time.time() + 5.0
-        while time.time() < deadline and set(queued) != {
-            "proc_batch_2",
-            "proc_batch_3",
-        }:
-            try:
-                evt = isolated_queue.get(timeout=0.1)
-            except _queue_mod.Empty:
-                continue
-            queued[evt["session_id"]] = evt
-        assert set(queued) == {"proc_batch_2", "proc_batch_3"}
+        assert len(turns) == 2
+        assert all(f"proc_batch_{index}" in turns[1] for index in range(1, 4))
+        assert isolated_queue.empty()
     finally:
         release_nested.set()
         for thread in threads:
@@ -18048,8 +18033,8 @@ def test_config_show_displays_nested_max_turns(monkeypatch):
     assert ["Max Turns", "120"] in agent_rows
 
 
-def test_notification_poller_delivers_completion(monkeypatch):
-    """Poller picks up completion events and triggers agent turns."""
+def test_notification_poller_batches_ready_completions(monkeypatch):
+    """Poller emits each completion but wakes the model once for a ready backlog."""
     import queue as _queue_mod
 
     from tools.process_registry import process_registry
@@ -18088,19 +18073,22 @@ def test_notification_poller_delivers_completion(monkeypatch):
     # teardown. (Same pattern as test_notification_poller_requeues_when_busy.)
     isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
     monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
-    process_registry._completion_consumed.discard("proc_poller_test")
+    process_ids = ["proc_poller_test", "proc_poller_second"]
+    for process_id in process_ids:
+        process_registry._completion_consumed.discard(process_id)
 
     stop = threading.Event()
 
     # Put event on queue, then immediately signal stop so the poller
     # runs exactly one iteration.
-    isolated_queue.put({
-        "type": "completion",
-        "session_id": "proc_poller_test",
-        "command": "echo hello",
-        "exit_code": 0,
-        "output": "hello",
-    })
+    for process_id in process_ids:
+        isolated_queue.put({
+            "type": "completion",
+            "session_id": process_id,
+            "command": "echo hello",
+            "exit_code": 0,
+            "output": "hello",
+        })
     stop.set()
 
     try:
@@ -18108,12 +18096,15 @@ def test_notification_poller_delivers_completion(monkeypatch):
 
         # Should have emitted a status.update with kind=process
         status_calls = [a for a in emitted if a[0] == "status.update"]
-        assert len(status_calls) >= 1
-        assert status_calls[0][2]["kind"] == "process"
+        assert len(status_calls) == 2
+        assert all(call[2]["kind"] == "process" for call in status_calls)
 
         # Should have triggered an agent turn
         assert len(turns) == 1
-        assert "[IMPORTANT: Background process proc_poller_test completed normally" in turns[0]
+        assert all(
+            f"[IMPORTANT: Background process {process_id} completed normally" in turns[0]
+            for process_id in process_ids
+        )
     finally:
         server._sessions.pop("sid_poll", None)
         while not process_registry.completion_queue.empty():

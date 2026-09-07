@@ -47,6 +47,55 @@ def test_cli_completion_drain_uses_visible_session_identity(monkeypatch):
     assert completed == [(event, "claim-token")]
 
 
+def test_cli_completion_drain_batches_ready_process_completions(monkeypatch):
+    cli = HermesCLI.__new__(HermesCLI)
+    cli.session_id = "visible-session"
+    cli._pending_input = queue.Queue()
+
+    events = [
+        {
+            "type": "completion",
+            "session_id": f"proc_{index}",
+            "session_key": "visible-session",
+        }
+        for index in range(3)
+    ]
+
+    class FakeRegistry:
+        consumed = set()
+
+        def drain_notifications(self, *, session_key="", owns_event=None):
+            assert session_key == "visible-session"
+            assert all(owns_event(event) for event in events)
+            return [(event, f"completion payload {index}") for index, event in enumerate(events)]
+
+        def is_completion_consumed(self, session_id):
+            return session_id in self.consumed
+
+    completed = []
+    monkeypatch.setattr("tools.process_registry.process_registry", FakeRegistry())
+    monkeypatch.setattr(
+        "tools.async_delegation.claim_event_delivery",
+        lambda event, consumer: f"claim-{event['session_id']}",
+    )
+    monkeypatch.setattr(
+        "tools.async_delegation.complete_event_delivery",
+        lambda event, token: completed.append((event["session_id"], token)),
+    )
+
+    cli._drain_process_notifications("cli-idle")
+
+    assert cli._pending_input.qsize() == 1
+    FakeRegistry.consumed.add("proc_1")
+    prompt, _is_voice, _is_seeded = cli._tui_unwrap_input(cli._pending_input.get_nowait())
+    assert "completion payload 0" in prompt
+    assert "completion payload 1" not in prompt
+    assert "completion payload 2" in prompt
+    assert completed == [
+        (f"proc_{index}", f"claim-proc_{index}") for index in range(3)
+    ]
+
+
 def test_cli_completion_ownership_rejects_foreign_session():
     cli = HermesCLI.__new__(HermesCLI)
     cli.session_id = "visible-session"

@@ -2466,6 +2466,15 @@ class _SeededQueryMessage:
         return self.text
 
 
+class _ProcessCompletionBatch:
+    """Structured pending completions, retained until dispatch so late explicit consumption can suppress them."""
+
+    __slots__ = ("notifications",)
+
+    def __init__(self, notifications):
+        self.notifications = list(notifications)
+
+
 def _should_seed_interactive(query, image, quiet: bool, oneshot: bool) -> bool:
     """``-q`` seeds an interactive session only on a real TTY without ``--oneshot``/``-Q`` (automation answers and exits)."""
     if not (query or image) or oneshot or quiet:
@@ -3397,9 +3406,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         return str(resolved_key) == current_key
 
     def _drain_process_notifications(self, consumer: str) -> None:
-        """Queue background notifications owned by this session (drained with our stable identity so another window can't claim them)."""
+        """Queue owned notifications, batching adjacent process completions into one turn."""
         from tools.process_registry import process_registry
         from tools.async_delegation import claim_event_delivery, complete_event_delivery
+
+        completion_batch = []
+
+        def flush_completion_batch() -> None:
+            if not completion_batch:
+                return
+            self._pending_input.put(_ProcessCompletionBatch(completion_batch))
+            for event, _text, claim in completion_batch:
+                complete_event_delivery(event, claim)
+            completion_batch.clear()
 
         for event, synthetic_message in process_registry.drain_notifications(
             session_key=getattr(self, "session_id", "") or "", owns_event=self._owns_process_notification,
@@ -3407,8 +3426,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             claim = claim_event_delivery(event, consumer)
             if claim is None:
                 continue
+            if event.get("type", "completion") == "completion":
+                completion_batch.append((event, synthetic_message, claim))
+                continue
+            flush_completion_batch()
             self._pending_input.put(synthetic_message)
             complete_event_delivery(event, claim)
+        flush_completion_batch()
 
     def _drain_interrupt_queue_to_pending_input(self) -> None:
         """Move stray ``_interrupt_queue`` messages into ``_pending_input`` after every turn.
@@ -3476,6 +3500,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _tui_unwrap_input(self, user_input):
         """Unwrap ``_VoiceInputMessage`` / ``_SeededQueryMessage`` -> ``(text_or_tuple, is_voice_input, is_seeded_query)``."""
+        if isinstance(user_input, _ProcessCompletionBatch):
+            from tools.process_registry import process_registry
+            user_input = "\n\n".join(
+                text for event, text, _claim in user_input.notifications
+                if not process_registry.is_completion_consumed(event.get("session_id", ""))
+            )
         # Voice-transcribed messages arrive wrapped in a sentinel so only genuine STT output gets the voice
         # prefix (#65827).
         is_voice_input = isinstance(user_input, _VoiceInputMessage)

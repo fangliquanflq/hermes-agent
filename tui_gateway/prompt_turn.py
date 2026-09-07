@@ -395,22 +395,25 @@ def _run_post_turn_followups(
             session_key=session.get("session_key", ""),
             owns_event=lambda e: _session_owns_notification_event(sid, session, e),
             skip_poll_observed=False)
-        for index, (_evt, synth) in enumerate(drained):
+        batches = []
+        for notification in drained:
+            if (
+                batches
+                and notification[0].get("type", "completion") == "completion"
+                and batches[-1][0][0].get("type", "completion") == "completion"
+            ):
+                batches[-1].append(notification)
+            else:
+                batches.append([notification])
+        for index, batch in enumerate(batches):
             with session["history_lock"]:
                 if session.get("running"):
-                    for pending_evt, _pending_synth in drained[index:]:
-                        process_registry.completion_queue.put(pending_evt)
+                    for pending_batch in batches[index:]:
+                        for pending_evt, _pending_synth in pending_batch:
+                            process_registry.completion_queue.put(pending_evt)
                     break
                 session["running"] = True
-            from tools.async_delegation import (
-                claim_event_delivery, complete_event_delivery, release_event_delivery)
-            _claim = claim_event_delivery(_evt, "tui-post-turn")
-            if _claim is None:
-                continue
-            _dispatch_followup_turn(
-                rid, sid, session, synth, "completion notification dispatch",
-                on_done=lambda: complete_event_delivery(_evt, _claim),
-                on_error=lambda: release_event_delivery(_evt, _claim))
+            _notif_dispatch_events(sid, session, batch, consumer="tui-post-turn")
     except Exception as _drain_exc:
         _hook_failure("completion queue drain", _drain_exc)
 
