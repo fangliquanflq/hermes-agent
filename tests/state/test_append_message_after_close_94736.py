@@ -109,6 +109,60 @@ class TestAppendAfterClose:
         assert len(rows) == n_writes
         db.close()
 
+    def test_generation_probe_waits_for_clean_close_transition(self, tmp_path, monkeypatch):
+        """A clean sidecar removal must not look like an external generation loss."""
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("s1", "cli")
+        close_transition = threading.Event()
+        allow_close = threading.Event()
+        writer_started = threading.Event()
+        writer_finished = threading.Event()
+        errors = []
+        real_close = db._close_connection_quietly
+
+        def _pause_after_connection_close(conn):
+            real_close(conn)
+            close_transition.set()
+            if not allow_close.wait(10.0):  # pragma: no cover - failure path
+                raise AssertionError("timed out holding the clean-close transition")
+            close_transition.clear()
+
+        def _generation_was_lost():
+            # Model the observable sidecar gap after sqlite closes the connection
+            # but before close() publishes that the old identity ended cleanly.
+            return close_transition.is_set()
+
+        monkeypatch.setattr(db, "_close_connection_quietly", _pause_after_connection_close)
+        monkeypatch.setattr(db, "_wal_generation_was_lost", _generation_was_lost)
+
+        closer = threading.Thread(target=db.close)
+
+        def _append():
+            writer_started.set()
+            try:
+                db.append_message("s1", "tool", content="after clean close")
+            except BaseException as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+            finally:
+                writer_finished.set()
+
+        writer = threading.Thread(target=_append)
+        closer.start()
+        assert close_transition.wait(5.0)
+        writer.start()
+        assert writer_started.wait(5.0)
+        writer_finished.wait(2.0)
+        allow_close.set()
+        closer.join(10.0)
+        writer.join(10.0)
+
+        assert not closer.is_alive()
+        assert not writer.is_alive()
+        assert errors == []
+        assert db._db_wal_generation_lost is False
+        assert [row["content"] for row in db.get_messages("s1")] == ["after clean close"]
+        db.close()
+
     def test_read_only_handle_still_refuses_after_close(self, tmp_path):
         """A read-only cross-profile handle must NOT silently reopen — it
         raises an explicit error naming the closed handle."""

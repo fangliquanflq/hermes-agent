@@ -791,10 +791,14 @@ class SessionDB(
         ioerr_begin_retried = False
         while True:
             self._raise_if_db_corrupt()
-            self._raise_if_db_replaced()
             fn_started = False
             try:
                 with self._lock:
+                    # The generation probe and connection lifecycle are one critical
+                    # section. A clean close may unlink WAL/SHM before it clears the
+                    # recorded sidecar identity; observing that internal transition
+                    # would otherwise quarantine this handle as externally replaced.
+                    self._raise_if_db_replaced()
                     if self._conn is None:  # close() raced this writer
                         self._reopen_after_close_locked(context="write")
                     self._conn.execute("BEGIN IMMEDIATE")
