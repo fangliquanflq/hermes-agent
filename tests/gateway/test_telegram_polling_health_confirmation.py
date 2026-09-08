@@ -10,6 +10,10 @@ reconnect is a reliable hung-poll signature.
 
 import asyncio
 import logging
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 from gateway.config import Platform  # noqa: E402
 from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: E402
 
@@ -32,6 +36,25 @@ def _bare_adapter():
 
 
 class TestPollingHealthConfirmation:
+    @pytest.mark.asyncio
+    async def test_first_progress_replays_failed_obligations_without_adapter_replacement(self):
+        adapter = _bare_adapter()
+        adapter._owner_profile = "reviewer"
+        adapter._background_tasks = set()
+        redeliver = AsyncMock(return_value=1)
+        adapter.gateway_runner = SimpleNamespace(
+            _redeliver_failed_obligations_for_platform=redeliver
+        )
+
+        adapter._record_polling_progress(1)
+        await asyncio.sleep(0)
+
+        redeliver.assert_awaited_once_with(Platform.TELEGRAM, profile="reviewer")
+
+        adapter._record_polling_progress(1)
+        await asyncio.sleep(0)
+        assert redeliver.await_count == 1
+
     def test_first_progress_emits_confirmed_healthy(self, caplog):
         a = _bare_adapter()
         with caplog.at_level(logging.INFO, logger="plugins.platforms.telegram.adapter"):

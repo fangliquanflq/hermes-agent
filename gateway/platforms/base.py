@@ -3670,10 +3670,11 @@ class BasePlatformAdapter(ABC):
         self, obligation_id: str, result: Any, event: MessageEvent,
         delivery_adapter: "BasePlatformAdapter") -> None:
         """Mark the ledger row delivered/failed (best-effort). On ``send_path_degraded`` with a
-        replacement adapter live, trigger another redelivery sweep (the watcher's may have run
-        before this failure landed; atomic claiming keeps it idempotent). On a flood-control refusal
-        arm the runner's timed redelivery, so the reply goes out once the penalty has passed instead
-        of waiting for the next restart."""
+        recovered delivery path, trigger another redelivery sweep: either a replacement adapter's
+        sweep or an in-place recovery sweep may have run before this failure landed, and atomic
+        claiming keeps the compensation idempotent. On a flood-control refusal arm the runner's
+        timed redelivery, so the reply goes out once the penalty has passed instead of waiting for
+        the next restart."""
         try:
             from gateway.delivery_ledger import is_flood_error, mark_delivered, mark_failed
             if getattr(result, "success", False):
@@ -3685,7 +3686,9 @@ class BasePlatformAdapter(ABC):
                 redeliver = getattr(
                     self.gateway_runner, "_redeliver_failed_obligations_for_platform", None)
                 live = self._final_delivery_adapter(event.source)
-                if live is not delivery_adapter and callable(redeliver):
+                if callable(redeliver) and (
+                    live is not delivery_adapter or not delivery_adapter.send_path_degraded
+                ):
                     await redeliver(event.source.platform,
                                     profile=getattr(delivery_adapter, "_owner_profile", None))
             elif is_flood_error(error):

@@ -34,6 +34,11 @@ class _Adapter(BasePlatformAdapter):  # type: ignore[misc]
     def __init__(self):
         super().__init__(PlatformConfig(enabled=True), Platform.SLACK)
         self.sent = []
+        self.degraded = False
+
+    @property
+    def send_path_degraded(self):
+        return self.degraded
 
     async def connect(self, *, is_reconnect: bool = False):  # pragma: no cover
         return True
@@ -149,6 +154,28 @@ class TestProducerHook:
         assert _rows()[0][3] == "reviewer"
         runner._redeliver_failed_obligations_for_platform.assert_awaited_once_with(
             Platform.SLACK, profile="reviewer"
+        )
+
+    @pytest.mark.asyncio
+    async def test_late_transient_failure_signals_same_adapter_after_recovery(self):
+        adapter = _Adapter()
+        runner = MagicMock()
+        runner._adapter_for_source.return_value = adapter
+        runner._redeliver_failed_obligations_for_platform = AsyncMock(return_value=1)
+        adapter.gateway_runner = runner
+        adapter.send = AsyncMock(
+            return_value=SendResult(
+                success=False,
+                error="send_path_degraded",
+                retryable=True,
+            )
+        )
+
+        await _run(adapter, _event())
+
+        assert _rows()[0][1] == "failed"
+        runner._redeliver_failed_obligations_for_platform.assert_awaited_once_with(
+            Platform.SLACK, profile=None
         )
 
 
