@@ -96,6 +96,7 @@ VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 # Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
 BLOCK_RECURRENCE_LIMIT = 2
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
+VALID_WORKFLOW_ROLES = {"review", "finalize"}
 
 
 def normalize_reasoning_effort(effort: Optional[str]) -> Optional[str]:
@@ -715,6 +716,7 @@ class Task:
     block_kind: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    workflow_role: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -744,7 +746,7 @@ _TASK_REQUIRED_COLUMNS = (
 _TASK_OPTIONAL_COLUMNS = (
     "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
     "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
-    "current_step_key", "max_retries", "session_id", "completion_contract",
+    "current_step_key", "max_retries", "session_id", "completion_contract", "workflow_role",
 )
 # Text columns where "" is stored/read as "not set".
 _TASK_EMPTY_IS_NULL_COLUMNS = (
@@ -941,7 +943,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    -- Marks review/finalize cards so lifecycle transitions and decomposition
+    -- do not infer workflow semantics from titles or assignee names.
+    workflow_role        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1232,6 +1237,7 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    workflow_role: Optional[str] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1250,6 +1256,10 @@ def create_task(
     from hermes_cli.kanban_pr_acceptance import validate_contract
 
     completion_contract = validate_contract(completion_contract)
+    if workflow_role is not None:
+        workflow_role = str(workflow_role).strip().lower() or None
+    if workflow_role not in VALID_WORKFLOW_ROLES | {None}:
+        raise ValueError(f"workflow_role must be one of {sorted(VALID_WORKFLOW_ROLES)}")
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     assignee = _canonical_assignee(assignee)
@@ -1326,8 +1336,9 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, completion_contract
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, completion_contract,
+                        workflow_role
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
@@ -1337,6 +1348,7 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
                         1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        workflow_role,
                     ),
                 )
                 for pid in parents:
@@ -1359,6 +1371,7 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                         "model_override": model_override,
                         "provider_override": provider_override,
+                        "workflow_role": workflow_role,
                     },
                 )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
@@ -3104,16 +3117,22 @@ def _nonblank_str(value: Any) -> Optional[str]:
 def request_changes(
     conn: sqlite3.Connection, task_id: str, *, reason: str, expected_run_id: Optional[int] = None,
 ) -> tuple[bool, Optional[str]]:
-    """Close an active reviewer run (claimed from ``review``) and hand the task
-    back to the implementer from the latest ``review_requested`` event, parent
-    gating reapplied. Returns ``(ok, implementer | reason)``."""
+    """Close a reviewer run and return its implementation for rework.
+
+    Same-card reviews recover provenance from ``review_requested``. A separate
+    ``workflow_role='review'`` child routes to its sole completed parent; that
+    parent is reopened and all downstream work is invalidated atomically.
+    Returns ``(ok, implementer | reason)``.
+    """
     reason = str(redact_review_value(reason or "")).strip()
     if not reason:
         return False, "reason is required"
 
+    sibling_terminations: list[tuple[Optional[int], Optional[str]]] = []
     with write_txn(conn):
         task_row = conn.execute(
-            "SELECT status, assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
+            "SELECT status, assignee, current_run_id, worker_pid, claim_lock, workflow_role "
+            "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if task_row is None:
             return False, "task not found"
@@ -3125,49 +3144,119 @@ def request_changes(
 
         claimed_event = _latest_event(conn, task_id, "claimed", current_run_id)
         claimed_payload = _json_dict(_row_get(claimed_event, "payload"))
-        if claimed_payload.get("source_status") != "review":
+        if claimed_payload.get("source_status") == "review":
+            requested_event = _latest_event(conn, task_id, "review_requested")
+            if requested_event is None:
+                return False, "no prior review_requested event"
+            implementer = _nonblank_str(_json_dict(requested_event["payload"]).get("implementer"))
+            if implementer is None:
+                return False, "review handoff has no valid implementer provenance"
+            reviewer = _canonical_assignee(_nonblank_str(task_row["assignee"]))
+
+            new_status = _landing_status_after_parents(conn, task_id)
+            # consecutive_failures deliberately PRESERVED: a review transition is
+            # not evidence the pathology cleared; only complete_task resets it.
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status = ?,
+                       assignee = COALESCE(?, assignee),
+                       claim_lock = NULL,
+                       claim_expires = NULL,
+                       worker_pid = NULL
+                 WHERE id = ? AND status = 'running' AND current_run_id = ?
+                """,
+                (new_status, implementer, task_id, int(current_run_id)),
+            )
+            if cur.rowcount != 1:
+                return False, "task changed during review handoff"
+            run_id = _end_run(
+                conn, task_id, outcome="changes_requested", status=new_status, summary=reason,
+            )
+            _append_event(
+                conn,
+                task_id,
+                "changes_requested",
+                {
+                    "reason": reason,
+                    "implementer": implementer,
+                    "reviewer": reviewer,
+                    "status": new_status,
+                },
+                run_id=run_id,
+            )
+        elif task_row["workflow_role"] == "review":
+            parents = conn.execute(
+                "SELECT p.id, p.assignee, p.status FROM task_links l "
+                "JOIN tasks p ON p.id = l.parent_id "
+                "WHERE l.child_id = ? ORDER BY p.id",
+                (task_id,),
+            ).fetchall()
+            if len(parents) != 1 or parents[0]["status"] != "done":
+                return False, "active run was not claimed from review"
+
+            parent = parents[0]
+            implementer = _nonblank_str(parent["assignee"])
+            if implementer is None:
+                return False, "review parent has no valid implementer provenance"
+            reviewer = _canonical_assignee(_nonblank_str(task_row["assignee"]))
+            now = int(time.time())
+            reopened = conn.execute(
+                "UPDATE tasks SET status = 'ready', completed_at = NULL "
+                "WHERE id = ? AND status = 'done'",
+                (parent["id"],),
+            )
+            if reopened.rowcount != 1:
+                return False, "implementation parent changed during review handoff"
+            _append_event(
+                conn,
+                parent["id"],
+                "changes_requested",
+                {
+                    "reason": reason,
+                    "implementer": implementer,
+                    "reviewer": reviewer,
+                    "review_task": task_id,
+                    "status": "ready",
+                },
+            )
+            _insert_comment(
+                conn,
+                parent["id"],
+                reviewer or "reviewer",
+                f"Changes requested by review task {task_id}: {reason}",
+                now,
+            )
+
+            invalidation = invalidate_descendants_for_parent_reopen(
+                conn, parent["id"], author=reviewer or "reviewer",
+            )
+            conn.execute(
+                "UPDATE task_runs SET status = 'todo', outcome = 'changes_requested', "
+                "summary = ? WHERE id = ?",
+                (reason, int(current_run_id)),
+            )
+            _append_event(
+                conn,
+                task_id,
+                "changes_requested",
+                {
+                    "reason": reason,
+                    "implementer": implementer,
+                    "reviewer": reviewer,
+                    "implementation_parent": parent["id"],
+                    "status": "todo",
+                },
+                run_id=int(current_run_id),
+            )
+            sibling_terminations = [
+                pair for pair in invalidation["terminations"]
+                if pair != (task_row["worker_pid"], task_row["claim_lock"])
+            ]
+        else:
             return False, "active run was not claimed from review"
-
-        requested_event = _latest_event(conn, task_id, "review_requested")
-        if requested_event is None:
-            return False, "no prior review_requested event"
-        implementer = _nonblank_str(_json_dict(requested_event["payload"]).get("implementer"))
-        if implementer is None:
-            return False, "review handoff has no valid implementer provenance"
-        reviewer = _canonical_assignee(_nonblank_str(task_row["assignee"]))
-
-        new_status = _landing_status_after_parents(conn, task_id)
-        # consecutive_failures deliberately PRESERVED: a review transition is
-        # not evidence the pathology cleared; only complete_task resets it.
-        cur = conn.execute(
-            """
-            UPDATE tasks
-               SET status = ?,
-                   assignee = COALESCE(?, assignee),
-                   claim_lock = NULL,
-                   claim_expires = NULL,
-                   worker_pid = NULL
-             WHERE id = ? AND status = 'running' AND current_run_id = ?
-            """,
-            (new_status, implementer, task_id, int(current_run_id)),
-        )
-        if cur.rowcount != 1:
-            return False, "task changed during review handoff"
-        run_id = _end_run(
-            conn, task_id, outcome="changes_requested", status=new_status, summary=reason,
-        )
-        _append_event(
-            conn,
-            task_id,
-            "changes_requested",
-            {
-                "reason": reason,
-                "implementer": implementer,
-                "reviewer": reviewer,
-                "status": new_status,
-            },
-            run_id=run_id,
-        )
+    for pid, claim_lock in sibling_terminations:
+        _terminate_reclaimed_worker(pid, claim_lock)
     return True, implementer
 
 

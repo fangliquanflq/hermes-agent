@@ -382,6 +382,15 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "synthesizer task."
             ),
         },
+        "workflow_role": {
+            "type": "string",
+            "enum": ["review", "finalize"],
+            "description": (
+                "Optional workflow role. Review tasks may request changes from "
+                "their sole implementation parent; review/finalize tasks are "
+                "never auto-decomposed."
+            ),
+        },
         "tenant": _prop("string", (
                 "Optional namespace for multi-project isolation. "
                 "Defaults to HERMES_TENANT env if set."

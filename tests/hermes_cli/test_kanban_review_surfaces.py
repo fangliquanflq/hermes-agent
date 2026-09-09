@@ -165,6 +165,56 @@ def test_review_cli_round_trip_preserves_handoff(
         assert task.assignee == "builder"
 
 
+@pytest.mark.parametrize("surface", ["cli", "tool"])
+def test_review_child_request_changes_matches_cli_and_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+
+    with kbc.connect() as conn:
+        implementation_id = kb.create_task(
+            conn, title=f"{surface} implementation", assignee="builder",
+        )
+        review_id = kb.create_task(
+            conn,
+            title=f"{surface} review",
+            assignee="reviewer",
+            parents=[implementation_id],
+            workflow_role="review",
+        )
+        assert kb.complete_task(conn, implementation_id)
+        review = kb.claim_task(conn, review_id, claimer=f"reviewer:{surface}")
+        assert review is not None
+
+    monkeypatch.setenv("HERMES_PROFILE", "reviewer")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", review_id)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(review.current_run_id))
+    if surface == "cli":
+        output = kc.run_slash(
+            f"request-changes {review_id} 'cover the fallback branch'"
+        )
+        assert "Requested changes" in output
+    else:
+        from tools import kanban_tools as tools
+
+        output = json.loads(tools._handle_request_changes({
+            "reason": "cover the fallback branch",
+        }))
+        assert output["ok"] is True
+        assert output["implementer"] == "builder"
+
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, implementation_id).status == "ready"
+        assert kb.get_task(conn, review_id).status == "todo"
+
+
 def test_domain_and_cli_review_handoffs_redact_before_persistence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

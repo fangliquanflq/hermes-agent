@@ -162,3 +162,24 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
     assert "not in triage" in outcome.reason
 
 
+@pytest.mark.parametrize("workflow_role", ["review", "finalize"])
+def test_decompose_refuses_workflow_control_tasks(kanban_home, workflow_role):
+    with kbc.connect() as conn:
+        parent_id = kb.create_task(conn, title="implementation", assignee="builder")
+        review_id = kb.create_task(
+            conn,
+            title=f"{workflow_role} implementation",
+            assignee="reviewer",
+            parents=[parent_id],
+            triage=True,
+            workflow_role=workflow_role,
+        )
+
+    with patch("hermes_cli.kanban_decompose._call_aux") as call_aux:
+        outcome = decomp.decompose_task(review_id, author="auto-decomposer")
+
+    assert outcome.ok is False
+    assert outcome.reason == f"{workflow_role} workflow tasks cannot be decomposed"
+    call_aux.assert_not_called()
+
+

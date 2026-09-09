@@ -616,6 +616,68 @@ def test_legacy_review_child_deadlock_is_reported_immediately(conn):
     assert any(action.kind == "cli_hint" for action in deadlock.actions)
 
 
+def test_review_child_changes_reopen_implementation_and_regate_workflow(conn):
+    implementation_id = kb.create_task(
+        conn, title="Implement export", assignee="builder",
+    )
+    review_ids = [
+        kb.create_task(
+            conn,
+            title=f"Review export {index}",
+            assignee=f"reviewer-{index}",
+            parents=[implementation_id],
+            workflow_role="review",
+        )
+        for index in range(3)
+    ]
+    finalize_id = kb.create_task(
+        conn,
+        title="Finalize export",
+        assignee="release",
+        parents=[implementation_id, *review_ids],
+        workflow_role="finalize",
+    )
+
+    assert kb.complete_task(conn, implementation_id, summary="v1 ready")
+    rejecting = kb.claim_task(conn, review_ids[0], claimer="reviewer-0:1")
+    assert rejecting is not None
+    assert kb.complete_task(conn, review_ids[1], summary="review 1 approved")
+    running_sibling = kb.claim_task(conn, review_ids[2], claimer="reviewer-2:1")
+    assert running_sibling is not None
+
+    assert kb.request_changes(
+        conn,
+        review_ids[0],
+        reason="The fallback case is missing.",
+        expected_run_id=rejecting.current_run_id,
+    ) == (True, "builder")
+
+    implementation = kb.get_task(conn, implementation_id)
+    assert implementation is not None
+    assert implementation.status == "ready"
+    assert all(kb.get_task(conn, task_id).status == "todo" for task_id in review_ids)
+    assert kb.get_task(conn, finalize_id).status == "todo"
+    assert kb.latest_run(conn, review_ids[0]).outcome == "changes_requested"
+    assert kb.latest_run(conn, review_ids[2]).outcome == "reclaimed"
+    changes = _event(kb.list_events(conn, review_ids[0]), "changes_requested")
+    assert changes.payload == {
+        "reason": "The fallback case is missing.",
+        "implementer": "builder",
+        "reviewer": "reviewer-0",
+        "implementation_parent": implementation_id,
+        "status": "todo",
+    }
+
+    original_ids = set(review_ids + [finalize_id])
+    assert kb.complete_task(conn, implementation_id, summary="v2 ready")
+    assert all(kb.get_task(conn, task_id).status == "ready" for task_id in review_ids)
+    assert kb.get_task(conn, finalize_id).status == "todo"
+    assert set(kb.child_ids(conn, implementation_id)) == original_ids
+    for task_id in review_ids:
+        assert kb.complete_task(conn, task_id)
+    assert kb.get_task(conn, finalize_id).status == "ready"
+
+
 def test_hard_block_with_waiting_child_is_not_mislabeled_as_review_deadlock(conn):
     implementation_id = kb.create_task(
         conn, title="Implement export", assignee="builder"

@@ -308,6 +308,10 @@ def decompose_task(
     task, reason = _load_triage_task(task_id)
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
+    if task.workflow_role in kb.VALID_WORKFLOW_ROLES:
+        return DecomposeOutcome(
+            task_id, False, f"{task.workflow_role} workflow tasks cannot be decomposed",
+        )
 
     routing = _load_routing()
     raw, reason = _call_aux(
