@@ -158,14 +158,14 @@ def _background_delete_gate(action, operations, target="memory", content=None, o
             origin=wa.current_origin())
         return json.dumps({
             "success": True, "staged": True, "proposal_staged": True, "pending_id": record["id"],
-            "message": ("Background review may not delete memory entries unattended. The proposed "
+            "message": ("Background review may not replace or remove memory entries unattended. The proposed "
                         f"{'batch' if operations is not None else action} was staged for your approval — "
                         "review it with /memory pending (approve to apply, discard to drop)."),
         }, ensure_ascii=False)
     except Exception:
         logger.warning("Failed to stage background-review consolidation; denying", exc_info=True)
         return tool_error(
-            "Background review may not delete memory entries ('replace'/'remove', including in a "
+            "Background review may not replace or remove memory entries (including in a "
             "batch); 'add' is still available.", success=False)
 
 

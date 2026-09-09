@@ -801,6 +801,7 @@ class TestBackgroundReviewDeleteGate:
             reset_current_write_origin(token)
         assert result["staged"] is True
         assert result["proposal_staged"] is True
+        assert "replace or remove" in result["message"]
         # Fail-closed: the original entry is untouched.
         assert "entry the fork must not rewrite" in store._entries_for("memory")
 

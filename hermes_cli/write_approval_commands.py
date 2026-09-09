@@ -11,7 +11,23 @@ from tools import write_approval as wa
 
 def _fmt_state(subsystem: str) -> str:
     on = wa.write_approval_enabled(subsystem)
-    return f"{subsystem}.write_approval = {'on' if on else 'off'}"
+    state = f"{subsystem}.write_approval = {'on' if on else 'off'}"
+    if subsystem != wa.MEMORY:
+        return state
+    if on:
+        policy = (
+            "Effective policy: all memory writes require approval. Unattended background writes "
+            "are staged; attended writes may be approved inline. The separate unattended replace "
+            "or remove gate (including a batch containing either) does not apply to attended "
+            "/refine, but the general approval gate still does."
+        )
+    else:
+        policy = (
+            "Effective policy: attended writes, including /refine, apply immediately. Unattended "
+            "background adds apply immediately, but replace or remove operations — including an "
+            "entire batch containing either — are always staged; review them with /memory pending."
+        )
+    return f"{state} (general approval gate)\n{policy}"
 
 
 def _fmt_pending_list(subsystem: str) -> str:

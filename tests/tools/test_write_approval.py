@@ -201,6 +201,30 @@ def test_handle_approval_off(hermes_home):
     assert "off" in out
 
 
+@pytest.mark.parametrize(
+    ("enabled", "expected"),
+    [
+        (False, "background adds apply immediately"),
+        (True, "all memory writes require approval"),
+    ],
+)
+def test_memory_status_explains_effective_approval_policy(hermes_home, enabled, expected):
+    from hermes_cli.commands import COMMAND_REGISTRY
+    from hermes_cli.write_approval_commands import handle_pending_subcommand
+    from tools import write_approval as wa
+
+    _set_approval("memory", enabled)
+    out = handle_pending_subcommand(wa.MEMORY, [])
+
+    assert f"memory.write_approval = {'on' if enabled else 'off'}" in out
+    assert expected in out
+    assert "replace or remove" in out
+    assert "batch containing either" in out
+    assert "/refine" in out
+    memory_help = next(command for command in COMMAND_REGISTRY if command.name == "memory")
+    assert "effective approval policy" in memory_help.description
+
+
 # ---------------------------------------------------------------------------
 # Inline (interactive CLI) approval path — regression for the bug where the
 # per-thread approval callback was never passed to prompt_dangerous_approval,
