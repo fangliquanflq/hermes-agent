@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Query
 
 from hermes_cli.web_deps import late
+from hermes_cli.config_providers import find_provider_entry
 from hermes_cli.web_server_config import _apply_main_model_assignment, _normalize_main_model_assignment
 from hermes_cli.web_server_gateway import _strip_session_list_rows
 from hermes_cli.web_server_profiles import (
@@ -95,12 +96,30 @@ def _profile_setup_command(name: str) -> str:
 
 
 def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
-    """Write the main model assignment into ``profile_dir``'s config.yaml (HERMES_HOME-scoped);
-    clears stale ``base_url`` / ``context_length`` like ``POST /api/model/set`` does."""
-    from hermes_cli.config import load_config, save_config
-    with _hermes_home_scope(profile_dir):
+    """Write a model assignment and any missing custom-provider definition to a profile.
+
+    The profile picker is populated from the dashboard's profile, so a selected ``providers``
+    entry must travel with the assignment. Copy the raw entry to preserve credential pointers;
+    an existing target entry remains authoritative because profiles are independent islands.
+    """
+    from hermes_cli.config import load_config, read_raw_config, save_config
+
+    source_key, source_entry = find_provider_entry(read_raw_config().get("providers"), provider)
+    if source_entry is not None:
         provider, model = _normalize_main_model_assignment(provider, model)
+
+    with _hermes_home_scope(profile_dir):
+        if source_entry is None:
+            provider, model = _normalize_main_model_assignment(provider, model)
         cfg = load_config()
+        if source_entry is not None:
+            providers_cfg = cfg.get("providers")
+            if not isinstance(providers_cfg, dict):
+                providers_cfg = {}
+                cfg["providers"] = providers_cfg
+            _target_key, target_entry = find_provider_entry(providers_cfg, provider)
+            if target_entry is None:
+                providers_cfg[str(source_key)] = copy.deepcopy(source_entry)
         cfg["model"] = _apply_main_model_assignment(cfg.get("model", {}), provider, model)
         save_config(cfg)
 
