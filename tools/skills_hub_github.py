@@ -316,26 +316,68 @@ class GitHubSource(SkillSource):
 
     # -- Internal helpers --
 
+    def _skill_paths_from_tree(self, repo: str, path: str) -> Optional[List[str]]:
+        """Return outermost skill directories below a tap path.
+
+        ``None`` means the recursive tree was unavailable, so callers can fall
+        back to the shallow Contents API. Once a directory has a SKILL.md, any
+        deeper SKILL.md belongs to that skill's support files rather than being
+        another installable skill.
+        """
+        if (cached := self._get_repo_tree(repo)) is None:
+            return None
+        prefix = path.strip("/")
+        tree_prefix = f"{prefix}/" if prefix else ""
+        candidates: List[str] = []
+        for entry in cached[1]:
+            item_path = entry.get("path", "")
+            if entry.get("type") != "blob" or not item_path.startswith(tree_prefix):
+                continue
+            relative = item_path[len(tree_prefix):]
+            if not relative.endswith("/SKILL.md"):
+                continue
+            skill_rel = relative[:-len("/SKILL.md")]
+            if not skill_rel or any(part.startswith((".", "_")) for part in skill_rel.split("/")):
+                continue
+            candidates.append(f"{prefix}/{skill_rel}" if prefix else skill_rel)
+
+        candidate_set = set(candidates)
+        outermost: List[str] = []
+        for candidate in sorted(candidate_set):
+            parts = candidate.split("/")
+            if any(
+                "/".join(parts[:depth]) in candidate_set
+                for depth in range(1, len(parts))
+            ):
+                continue
+            outermost.append(candidate)
+        return outermost
+
     def _list_skills_in_repo(self, repo: str, path: str) -> List[SkillMeta]:
-        """List skill directories in a GitHub repo path, using cached index."""
+        """List skill directories below a GitHub tap path, using cached index."""
         cache_key = f"{repo}_{path}".replace("/", "_").replace(" ", "_")
         cached = _cached_metas(cache_key)
         if cached is not None:
             return cached
-        resp = self._github_get(f"{_API}/{repo}/contents/{path.rstrip('/')}")
-        if resp is None or resp.status_code != 200:
-            return []
-        entries = resp.json()
-        if not isinstance(entries, list):
-            return []
+        prefix = path.rstrip("/")
+        skill_paths = self._skill_paths_from_tree(repo, prefix)
+        if skill_paths is None:
+            resp = self._github_get(f"{_API}/{repo}/contents/{prefix}")
+            if resp is None or resp.status_code != 200:
+                return []
+            entries = resp.json()
+            if not isinstance(entries, list):
+                return []
+            skill_paths = [
+                f"{prefix}/{entry['name']}" if prefix else entry["name"]
+                for entry in entries
+                if entry.get("type") == "dir" and not entry["name"].startswith((".", "_"))
+            ]
         skills: List[SkillMeta] = []
         groupings = self._get_skillsh_groupings(repo)
-        prefix = path.rstrip("/")
-        for entry in entries:
-            if entry.get("type") != "dir" or entry["name"].startswith((".", "_")):
-                continue
-            dir_name = entry["name"]
-            meta = self.inspect(f"{repo}/{prefix}/{dir_name}" if prefix else f"{repo}/{dir_name}")
+        for skill_path in skill_paths:
+            dir_name = skill_path.rsplit("/", 1)[-1]
+            meta = self.inspect(f"{repo}/{skill_path}")
             if meta:
                 category = groupings and (groupings.get(meta.name) or groupings.get(dir_name))
                 if category:

@@ -3,7 +3,7 @@
 import json
 import time
 from typing import List, Optional
-from unittest.mock import patch, MagicMock
+from unittest.mock import call, patch, MagicMock
 
 import httpx
 import pytest
@@ -95,6 +95,7 @@ class TestSkillsShGroupings:
 
         with patch("tools.skills_hub._read_index_cache", return_value=None), \
              patch("tools.skills_hub._write_index_cache"), \
+             patch.object(src, "_get_repo_tree", return_value=None), \
              patch.object(src, "_get_skillsh_groupings", return_value=groupings), \
              patch.object(src, "inspect", return_value=meta), \
              patch("tools.skills_hub.httpx.get", return_value=resp):
@@ -102,6 +103,38 @@ class TestSkillsShGroupings:
 
         assert len(skills) == 1
         assert skills[0].extra["category"] == "Decision Optimization"
+
+    def test_list_skills_discovers_nested_categories_without_support_skills(self):
+        src = GitHubSource(auth=MagicMock(spec=GitHubAuth))
+        src._get_repo_tree = MagicMock(return_value=("main", [
+            {"path": "skills/software-development/web-design/SKILL.md", "type": "blob"},
+            {
+                "path": "skills/software-development/web-design/references/example/SKILL.md",
+                "type": "blob",
+            },
+            {"path": "skills/top-level/SKILL.md", "type": "blob"},
+            {"path": "skills/.hidden/private/SKILL.md", "type": "blob"},
+            {"path": "skills/_internal/private/SKILL.md", "type": "blob"},
+        ]))
+        metas = {
+            "owner/repo/skills/software-development/web-design": SkillMeta(
+                name="web-design", description="nested", source="github",
+                identifier="owner/repo/skills/software-development/web-design", trust_level="community",
+            ),
+            "owner/repo/skills/top-level": SkillMeta(
+                name="top-level", description="flat", source="github",
+                identifier="owner/repo/skills/top-level", trust_level="community",
+            ),
+        }
+        src.inspect = MagicMock(side_effect=metas.get)
+        src._get_skillsh_groupings = MagicMock(return_value=None)
+
+        with patch("tools.skills_hub._read_index_cache", return_value=None), \
+             patch("tools.skills_hub._write_index_cache"):
+            skills = src._list_skills_in_repo("owner/repo", "skills/")
+
+        assert [skill.identifier for skill in skills] == list(metas)
+        src.inspect.assert_has_calls([call(identifier) for identifier in metas])
 
 # ---------------------------------------------------------------------------
 # GitHubSource.trust_level_for
