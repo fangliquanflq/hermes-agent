@@ -4,7 +4,7 @@ session can't call (Blank Slate audit, Aug 2026).
 Covers:
   * HERMES_AGENT_HELP_GUIDANCE degrades to the docs-only variant when the
     skill tools aren't loaded.
-  * execution_guidance_text() drops web_search lines when web tools are off.
+  * execution_guidance_text() names only tools available to the session.
   * The coding operating brief drops the `todo` sentence when the todo tool
     isn't loaded.
   * ESSENTIAL_SKILLS can't be disabled via config, and the CLI writer strips
@@ -31,7 +31,9 @@ class TestExecutionGuidanceText:
             OPENAI_MODEL_EXECUTION_GUIDANCE,
             execution_guidance_text,
         )
-        assert execution_guidance_text({"web_search", "terminal"}) == (
+        assert execution_guidance_text({
+            "web_search", "terminal", "execute_code", "read_file", "search_files",
+        }) == (
             OPENAI_MODEL_EXECUTION_GUIDANCE
         )
 
@@ -46,10 +48,21 @@ class TestExecutionGuidanceText:
         from agent.prompt_builder import execution_guidance_text
         text = execution_guidance_text({"terminal", "read_file"})
         assert "web_search" not in text
+        assert "execute_code" not in text
+        assert "search_files" not in text
         # The surrounding structure survives.
         assert "<mandatory_tool_use>" in text
         assert "<missing_context>" in text
-        assert "(search_files, read_file, etc.)" in text
+        assert "File contents, sizes, line counts → use read_file or terminal" in text
+
+    def test_lean_toolset_has_no_phantom_shell_or_file_tools(self):
+        from agent.prompt_builder import execution_guidance_text
+        text = execution_guidance_text({"memory", "web_search"})
+        for missing_tool in ("terminal", "execute_code", "read_file", "search_files"):
+            assert missing_tool not in text
+        assert "Current facts (weather, news, versions) → use web_search" in text
+        assert "<mandatory_tool_use>" in text
+        assert "<act_dont_ask>" in text
 
 
 class TestCodingBriefTodoGating:

@@ -468,12 +468,68 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
 def execution_guidance_text(valid_tool_names=None) -> str:
     """OPENAI_MODEL_EXECUTION_GUIDANCE for the session's toolset (cache-safe: the toolset is fixed per session).
 
-    Without web tools (e.g. Blank Slate) the ``web_search`` mentions would dangle, so they are dropped/adjusted.
+    Tool-specific instructions are retained only when the named tool is available. The unfiltered constant remains the
+    fast path so full-tool sessions keep byte-identical cached prompts.
     """
+    if valid_tool_names is None:
+        return OPENAI_MODEL_EXECUTION_GUIDANCE
+
+    valid_tool_names = set(valid_tool_names)
+    referenced_tools = {"terminal", "execute_code", "read_file", "search_files", "web_search"}
+    if referenced_tools <= valid_tool_names:
+        return OPENAI_MODEL_EXECUTION_GUIDANCE
+
+    def _choices(names):
+        available = [name for name in names if name in valid_tool_names]
+        if len(available) < 2:
+            return "".join(available)
+        if len(available) == 2:
+            return " or ".join(available)
+        return f"{', '.join(available[:-1])}, or {available[-1]}"
+
+    def _replace_instruction(text, original, subject, tools):
+        choices = _choices(tools)
+        replacement = f"- {subject} → use {choices}\n" if choices else ""
+        return text.replace(original, replacement)
+
     text = OPENAI_MODEL_EXECUTION_GUIDANCE
-    if valid_tool_names is not None and "web_search" not in valid_tool_names:
-        text = text.replace("- Current facts (weather, news, versions) → use web_search\n", "")
-        text = text.replace("(search_files, web_search, read_file, etc.)", "(search_files, read_file, etc.)")
+    instructions = (
+        ("- Arithmetic, math, calculations → use terminal or execute_code\n",
+         "Arithmetic, math, calculations", ("terminal", "execute_code")),
+        ("- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)\n",
+         "Hashes, encodings, checksums", ("terminal",)),
+        ("- Current time, date, timezone → use terminal (e.g. date)\n",
+         "Current time, date, timezone", ("terminal",)),
+        ("- System state: OS, CPU, memory, disk, ports, processes → use terminal\n",
+         "System state: OS, CPU, memory, disk, ports, processes", ("terminal",)),
+        ("- File contents, sizes, line counts → use read_file, search_files, or terminal\n",
+         "File contents, sizes, line counts", ("read_file", "search_files", "terminal")),
+        ("- Git history, branches, diffs → use terminal\n",
+         "Git history, branches, diffs", ("terminal",)),
+        ("- Current facts (weather, news, versions) → use web_search\n",
+         "Current facts (weather, news, versions)", ("web_search",)),
+    )
+    for original, subject, tools in instructions:
+        text = _replace_instruction(text, original, subject, tools)
+
+    if "terminal" not in valid_tool_names:
+        text = text.replace(
+            "Examples:\n"
+            "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
+            "- 'What OS am I running?' → check the live system (don't use user profile)\n"
+            "- 'What time is it?' → run `date` (don't guess)\n",
+            "",
+        )
+
+    lookup_tools = _choices(("search_files", "web_search", "read_file"))
+    lookup_instruction = "- Use an available lookup method when required context is retrievable.\n"
+    if lookup_tools:
+        lookup_instruction = f"- Use the appropriate lookup tool when missing information is retrievable ({lookup_tools}).\n"
+    text = text.replace(
+        "- Use the appropriate lookup tool when missing information is retrievable (search_files, web_search, read_file, "
+        "etc.).\n",
+        lookup_instruction,
+    )
     return text
 
 
