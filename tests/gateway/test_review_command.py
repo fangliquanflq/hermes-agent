@@ -8,7 +8,8 @@ tests/tools/test_async_delegation.py).
 
 import json
 import time
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -136,8 +137,54 @@ async def test_review_command_rejects_while_agent_running():
 async def test_review_command_requires_cached_agent():
     runner = _make_runner(None)
     runner._agent_cache = {}
+    runner._async_session_store = AsyncMock()
+    runner._async_session_store.get_or_create_session.return_value = SimpleNamespace(
+        session_id="gw-review-sess"
+    )
+    runner._async_session_store.load_transcript.return_value = []
     out = await runner._handle_review_command(_Event())
     assert "send a message first" in out
+
+
+@pytest.mark.asyncio
+async def test_review_command_rehydrates_persisted_topic_session(monkeypatch):
+    from agent import review_engine as re_mod
+
+    persisted = [
+        {"role": "user", "content": "review the topic work"},
+        {"role": "assistant", "content": "implemented it"},
+    ]
+    agent = _make_agent()
+    runner = _make_runner(None)
+    runner._agent_cache = {}
+    runner._async_session_store = AsyncMock()
+    runner._async_session_store.get_or_create_session.return_value = SimpleNamespace(
+        session_id="persisted-topic-session"
+    )
+    runner._async_session_store.load_transcript.return_value = persisted
+    runner._build_idle_review_agent = AsyncMock(return_value=agent)
+    dispatched = {}
+
+    def fake_start(parent, messages, args):
+        dispatched.update(parent=parent, messages=messages, args=args)
+        return {"status": "dispatched"}
+
+    monkeypatch.setattr(re_mod, "start_review", fake_start)
+
+    event = _Event("focus")
+    out = await runner._handle_review_command(event)
+
+    assert out == re_mod.format_dispatch_note({"status": "dispatched"}, "focus")
+    runner._async_session_store.get_or_create_session.assert_awaited_once_with(
+        event.source, touch_activity=False
+    )
+    runner._async_session_store.load_transcript.assert_awaited_once_with(
+        "persisted-topic-session"
+    )
+    runner._build_idle_review_agent.assert_awaited_once_with(
+        event.source, SESSION_KEY, "persisted-topic-session", persisted
+    )
+    assert dispatched == {"parent": agent, "messages": persisted, "args": "focus"}
 
 
 @pytest.mark.asyncio

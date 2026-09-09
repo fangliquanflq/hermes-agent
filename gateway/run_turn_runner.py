@@ -1687,6 +1687,42 @@ class TurnRunner:
         unique_tags = (["[[audio_as_voice]]"] if has_voice_directive else []) + list(dict.fromkeys(media_tags))
         return final_response + "\n" + "\n".join(unique_tags)
 
+    def _resolve_agent_for_context(self):
+        """Resolve and cache the normal gateway agent without starting a turn.
+
+        Idle commands use this to attach side work to a durable conversation after
+        the in-memory agent was evicted. Keeping construction here makes that cold
+        path use the same provider, toolset, prompt, and cache signature as the next
+        real turn.
+        """
+        from gateway.run import _current_max_iterations
+
+        ctx = self._ctx
+        runner = self._runner
+        platform_key = "cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value
+        combined_ephemeral = self._combined_ephemeral_prompt()
+        max_iterations = _current_max_iterations()
+        model, runtime_kwargs = runner._resolve_session_agent_runtime(
+            source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,
+        )
+        logger.debug(
+            "run_agent resolved: model=%s provider=%s session=%s",
+            model, runtime_kwargs.get("provider"), ctx.session_key or "",
+        )
+        reasoning_config = runner._resolve_session_reasoning_config(
+            source=ctx.source, session_key=ctx.session_key, model=model
+        )
+        runner._reasoning_config = reasoning_config
+        runner._service_tier = runner._resolve_session_service_tier(
+            source=ctx.source, session_key=ctx.session_key
+        )
+        turn_route = runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
+        agent, reused = self._resolve_turn_agent(
+            turn_route, platform_key, combined_ephemeral, max_iterations,
+            reasoning_config, runner._provider_routing,
+        )
+        return agent, reused, turn_route, reasoning_config, platform_key
+
     def run_sync(self):
         """Executor-thread body of the turn; returns the gateway result dict.
 
@@ -1694,7 +1730,7 @@ class TurnRunner:
         every rebind. session_key propagates via contextvars (_set_session_env / set_current_session_key)
         — never os.environ["HERMES_SESSION_KEY"], which would misroute approvals across sessions.
         """
-        from gateway.run import _current_max_iterations, _normalize_empty_agent_response, _sanitize_gateway_final_response
+        from gateway.run import _normalize_empty_agent_response, _sanitize_gateway_final_response
         ctx = self._ctx
         runner = self._runner
         # Platform.LOCAL ("local") maps to the "cli" hint key the agent understands.
@@ -1708,28 +1744,14 @@ class TurnRunner:
         # session via contextvars (set_current_session_key / session context), and only the TUI slash-worker
         # *subprocess* exports HERMES_SESSION_KEY (from its own --session-key argv, a separate process) — so
         # removing this in-process gateway write does not affect any of them.
-        platform_key = "cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value
-        combined_ephemeral = self._combined_ephemeral_prompt()
-        max_iterations = _current_max_iterations()
         try:
-            model, runtime_kwargs = runner._resolve_session_agent_runtime(
-                source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,
-            )
-            logger.debug(
-                "run_agent resolved: model=%s provider=%s session=%s",
-                model, runtime_kwargs.get("provider"), ctx.session_key or "",
-            )
+            (
+                agent, reused_cached_agent, turn_route, reasoning_config,
+                platform_key,
+            ) = self._resolve_agent_for_context()
         except Exception as exc:
             return {"final_response": f"⚠️ Provider authentication failed: {exc}", "messages": [], "api_calls": 0, "tools": []}
-        pr = runner._provider_routing
-        reasoning_config = runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model)
-        runner._reasoning_config = reasoning_config
-        runner._service_tier = runner._resolve_session_service_tier(source=ctx.source, session_key=ctx.session_key)
         stream_consumer, stream_delta_cb, interim_cb, want_interim = self._setup_stream_consumer(platform_key)
-        turn_route = runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
-        agent, reused_cached_agent = self._resolve_turn_agent(
-            turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
-        )
         self._wire_turn_agent_callbacks(agent, turn_route, reasoning_config, stream_delta_cb, interim_cb, want_interim)
         agent_history, observed_group_context, history_media_paths = self._load_turn_history(agent, reused_cached_agent)
         persist_msg, persist_ts = self._prepare_turn_message(agent_history)

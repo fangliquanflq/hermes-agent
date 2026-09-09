@@ -169,6 +169,65 @@ class GatewayGoalCommandsMixin:
             return quick_key, None, f"Nothing to {verb} yet — send a message first."
         return quick_key, agent, None
 
+    async def _build_idle_review_agent(
+        self, source, session_key: str, session_id: str, history: list,
+    ):
+        """Build/cache the same agent a normal turn would, without adding a turn."""
+        from run_agent import AIAgent
+
+        with self._profile_scope_for_source(source):
+            display = self._run_agent_display_settings(source)
+            _ctx, turn_runner, _cleanup_adapter = self._run_agent_build_turn_context(
+                display, AIAgent, message="", source=source, session_key=session_key,
+                run_generation=None, context_prompt="", history=history,
+                session_id=session_id,
+            )
+            agent, _reused, _route, _reasoning, _platform = (
+                await self._run_in_executor_with_context(
+                    turn_runner._resolve_agent_for_context
+                )
+            )
+        return agent
+
+    async def _idle_review_agent_or_error(self, event: MessageEvent):
+        """Resolve /review state, recovering a cold agent from the durable transcript."""
+        quick_key = self._session_key_for_source(event.source) if event.source else None
+        if not quick_key:
+            return None, None, None, "Review unavailable (no session)."
+        if quick_key in self._running_agents:
+            return (
+                quick_key, None, None,
+                "Agent is running — wait for the turn to finish, then /review.",
+            )
+        agent = self._cached_agent_for(quick_key)
+        if agent is not None:
+            snapshot = list(getattr(agent, "_session_messages", None) or [])
+            return quick_key, agent, snapshot, None
+
+        try:
+            with self._profile_scope_for_source(event.source):
+                entry = await self._async_session_store.get_or_create_session(
+                    event.source, touch_activity=False
+                )
+                snapshot = await self._async_session_store.load_transcript(
+                    entry.session_id
+                )
+                if not snapshot:
+                    return (
+                        quick_key, None, None,
+                        "Nothing to review yet — send a message first.",
+                    )
+                agent = await self._build_idle_review_agent(
+                    event.source, quick_key, entry.session_id, snapshot
+                )
+        except Exception as exc:
+            logger.warning("Failed to recover the /review session for %s: %s", quick_key, exc)
+            return (
+                quick_key, None, None,
+                "Review unavailable — the conversation could not be loaded.",
+            )
+        return quick_key, agent, list(snapshot), None
+
     async def _handle_refine_command(self, event: MessageEvent) -> str:
         """Handle /refine — run the memory/skill review fork on demand, in a daemon thread against a
         snapshot of the cached AIAgent's conversation (live session and prompt cache untouched)."""
@@ -197,10 +256,9 @@ class GatewayGoalCommandsMixin:
         contextvar is only bound during agent turns, so bind it explicitly here or the completion
         event carries no gateway route and never re-enters this chat."""
         args = (event.get_command_args() or "").strip()
-        quick_key, agent, error = self._idle_cached_agent_or_error(event, "review")
+        quick_key, agent, snapshot, error = await self._idle_review_agent_or_error(event)
         if error:
             return error
-        snapshot = list(getattr(agent, "_session_messages", None) or [])
         from tools.approval_context import reset_current_session_key, set_current_session_key
 
         def _dispatch():
