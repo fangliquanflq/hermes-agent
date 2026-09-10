@@ -205,6 +205,18 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.auth
         assert result.should_fallback is True
 
+    def test_openrouter_monthly_budget_403_is_billing(self):
+        e = MockAPIError(
+            "Budget limit exceeded (monthly limit). Contact your org admin.",
+            status_code=403,
+        )
+
+        result = classify_api_error(e, provider="openrouter")
+
+        assert result.reason == FailoverReason.billing
+        assert result.retryable is False
+        assert result.should_fallback is True
+
 
 
 

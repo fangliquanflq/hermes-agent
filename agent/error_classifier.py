@@ -657,9 +657,17 @@ def classify_api_error(
 # ── Status code handlers ────────────────────────────────────────────────
 
 def _status_403(c: _Ctx) -> Verdict:
-    # OpenRouter 403 "key limit exceeded" and similar plan/credit exhaustion are billing.
+    # OpenRouter wraps hard account/key budget walls in 403. Keep explicit
+    # throttles and limits with reset signals on the auth-fallback path rather
+    # than treating every occurrence of "limit exceeded" as exhausted credit.
     xai_spend = c.provider_slug == "xai-oauth" and c.code == _XAI_SPENDING_LIMIT_ERROR_CODE
-    billing = xai_spend or any(p in c.msg for p in ("key limit exceeded", "spending limit") + _BILLING_PATTERNS)
+    quota_wall = any(p in c.msg for p in _USAGE_LIMIT_PATTERNS)
+    explicit_rate_limit = any(p in c.msg for p in _RATE_LIMIT_PATTERNS)
+    billing = xai_spend or any(p in c.msg for p in ("spending limit",) + _BILLING_PATTERNS) or (
+        quota_wall
+        and not explicit_rate_limit
+        and not _has_usage_limit_transient_signal(c.msg, c.body, c.headers)
+    )
     return _V_BILLING if billing else _V_AUTH_FALLBACK
 
 

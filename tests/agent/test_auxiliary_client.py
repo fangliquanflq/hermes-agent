@@ -1664,6 +1664,39 @@ class TestCallLlmPaymentFallback:
         # Fallback client should have been used
         assert fallback_client.chat.completions.create.called
 
+    def test_openrouter_monthly_budget_403_triggers_fallback(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        primary_client = MagicMock()
+        budget_err = Exception(
+            "Budget limit exceeded (monthly limit). Contact your org admin."
+        )
+        budget_err.status_code = 403
+        primary_client.chat.completions.create.side_effect = budget_err
+
+        fallback_client = MagicMock()
+        fallback_client.chat.completions.create.return_value = _DummyResponse(
+            "fallback response"
+        )
+
+        with patch(
+            "agent.auxiliary_client._get_cached_client",
+            return_value=(primary_client, "openrouter/primary"),
+        ), patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("auto", "openrouter/primary", None, None, None),
+        ), patch(
+            "agent.auxiliary_client._try_payment_fallback",
+            return_value=(fallback_client, "fallback-model", "nous"),
+        ) as mock_fallback:
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "summarize"}],
+            )
+
+        assert result.choices[0].message.content == "fallback response"
+        assert mock_fallback.call_args.kwargs["reason"] == "payment error"
+
     def test_401_auth_error_triggers_fallback_in_auto_mode(self, monkeypatch):
         """401 auth errors should trigger fallback in auto mode (#21165).
 

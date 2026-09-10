@@ -31,6 +31,7 @@ from agent.codex_headers import (
     is_official_codex_base_url as _is_official_codex_base_url,
 )
 from agent.codex_runtime import _codex_event_has_content
+from agent.error_classifier import FailoverReason, classify_api_error
 
 # `openai.OpenAI` is imported lazily (~240 ms cold); `OpenAI` below is a proxy
 # so in-module calls, `auxiliary_client.OpenAI` reads and
@@ -2999,7 +3000,14 @@ def _is_payment_error(exc: Exception) -> bool:
     """Payment/credit/quota exhaustion: HTTP 402, or a billing/quota body on 403/404/429/no-status."""
     status = getattr(exc, "status_code", None)
     return status == 402 or (
-        status in {403, 404, 429, None} and _contains_any(str(exc).lower(), _PAYMENT_KEYWORDS)
+        status in {403, 404, 429, None}
+        and (
+            (
+                status == 403
+                and classify_api_error(exc).reason == FailoverReason.billing
+            )
+            or _contains_any(str(exc).lower(), _PAYMENT_KEYWORDS)
+        )
     )
 
 
