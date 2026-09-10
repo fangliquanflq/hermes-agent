@@ -120,7 +120,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "display.resume_display": _select("How resumed sessions display history", "minimal", "full", "off"),
     "display.busy_input_mode": _select("Input behavior while agent is running", "interrupt", "queue", "steer"),
     "approvals.mode": _select("Dangerous command approval mode", "manual", "smart", "off"),
-    "context.engine": _select("Context management engine", "default", "custom"),
+    "context.engine": _select("Context management engine", "compressor"),
     "human_delay.mode": _select("Simulated typing delay mode", "off", "typing", "fixed"),
     "logging.level": _select("Log level for agent.log", "DEBUG", "INFO", "WARNING", "ERROR"),
     "agent.service_tier": _select(
@@ -324,6 +324,37 @@ def _memory_provider_schema_options(cfg: Dict[str, Any]) -> List[str]:
     return options
 
 
+def _context_engine_schema_options() -> List[str]:
+    """Built-in compressor plus context engines that the runtime can load now."""
+    options = ["compressor"]
+    seen = {"compressor"}
+
+    def add(name: Any) -> None:
+        clean = name.strip() if isinstance(name, str) else ""
+        if clean and clean not in seen:
+            options.append(clean)
+            seen.add(clean)
+
+    try:
+        from plugins.context_engine import discover_context_engines
+        for name, _description, available in discover_context_engines():
+            if available:
+                add(name)
+    except Exception:  # pragma: no cover - discovery must not break config schema
+        pass
+
+    try:
+        from hermes_cli.plugins import discover_plugins, get_plugin_context_engine
+        discover_plugins()
+        plugin_engine = get_plugin_context_engine()
+        if plugin_engine is not None:
+            add(getattr(plugin_engine, "name", None))
+    except Exception:  # pragma: no cover - discovery must not break config schema
+        pass
+
+    return options
+
+
 def _schema_select_options(key: str) -> Optional[List[str]]:
     entry = CONFIG_SCHEMA.get(key)
     options = entry.get("options") if isinstance(entry, dict) else None
@@ -358,6 +389,7 @@ def _schema_with_dynamic_provider_options() -> Dict[str, Dict[str, Any]]:
             merge(f"{kind}.provider", _custom_provider_options(kind, list(existing), cfg))
 
     merge("memory.provider", _memory_provider_schema_options(cfg))
+    merge("context.engine", _context_engine_schema_options())
 
     tb_options = _schema_select_options("terminal.backend")
     if tb_options is not None:

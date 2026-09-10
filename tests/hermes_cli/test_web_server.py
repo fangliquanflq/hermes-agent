@@ -2479,6 +2479,36 @@ class TestBuildSchemaFromConfig:
         assert fields["memory.provider"]["type"] == "select"
         assert _web_server_config.CONFIG_SCHEMA["memory.provider"] is not fields["memory.provider"]
 
+    def test_context_engine_options_only_include_loadable_engines(self, monkeypatch):
+        from types import SimpleNamespace
+        from hermes_cli import plugins as plugin_manager
+        from plugins import context_engine
+
+        monkeypatch.setattr(_cfg_mod, "load_config", lambda: {})
+        monkeypatch.setattr(
+            context_engine,
+            "discover_context_engines",
+            lambda: [
+                ("available_engine", "available", True),
+                ("missing_dependency", "unavailable", False),
+            ],
+        )
+        monkeypatch.setattr(plugin_manager, "discover_plugins", lambda: None)
+        monkeypatch.setattr(
+            plugin_manager,
+            "get_plugin_context_engine",
+            lambda: SimpleNamespace(name="registered_engine"),
+        )
+
+        fields = _web_server_config._schema_with_dynamic_provider_options()
+
+        assert fields["context.engine"]["options"] == [
+            "compressor",
+            "available_engine",
+            "registered_engine",
+        ]
+        assert _web_server_config.CONFIG_SCHEMA["context.engine"]["options"] == ["compressor"]
+
 
 
 
