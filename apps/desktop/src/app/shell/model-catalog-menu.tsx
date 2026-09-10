@@ -722,7 +722,21 @@ function groupModels(
   const groups: ProviderGroup[] = []
 
   for (const provider of providers) {
-    const allFamilies = collapseModelFamilies(provider.models ?? [])
+    const catalogFamilies = collapseModelFamilies(provider.models ?? [])
+
+    const currentFamily =
+      !q && isCurrentProvider(provider, current.provider) && current.model
+        ? catalogFamilies.find(family => family.id === current.model || family.fastId === current.model)
+        : undefined
+
+    // A live session can keep running a dated/retired id after the provider's
+    // catalog changes. Keep that exact id as the active row: otherwise every
+    // visible row is treated as preset-only and its Thinking control never
+    // writes through to the session.
+    const allFamilies =
+      !q && isCurrentProvider(provider, current.provider) && current.model && !currentFamily
+        ? [...catalogFamilies, { fastId: null, id: current.model }]
+        : catalogFamilies
 
     if (allFamilies.length === 0) {
       continue
@@ -752,9 +766,7 @@ function groupModels(
     // stable curated order, so selecting a model can't shuffle the list. While
     // SEARCHING the pin is skipped: a query means "show me matches".
     const activeId =
-      !q && isCurrentProvider(provider, current.provider) && current.model
-        ? allFamilies.find(family => family.id === current.model || family.fastId === current.model)?.id
-        : undefined
+      !q && isCurrentProvider(provider, current.provider) && current.model ? (currentFamily?.id ?? current.model) : undefined
 
     const families = allFamilies.filter(family => shown.has(family.id) || family.id === activeId)
 

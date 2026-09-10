@@ -826,16 +826,16 @@ describe('createBackendSessionForSend profile routing', () => {
   })
 
   // Effort and fast mode are independent of the model-override decision.
-  it('keeps sending reasoning effort even when the model is omitted', async () => {
+  it.each(['none', 'minimal', 'high'])('keeps sending reasoning effort %s even when the model is omitted', async effort => {
     const params = await createWith(() => {
       setCurrentModel('openai/gpt-5.6-sol')
       setCurrentProvider('openai-codex')
       setCurrentModelSource('default')
-      setCurrentReasoningEffort('high')
+      setCurrentReasoningEffort(effort)
     })
 
     expect(params).not.toHaveProperty('model')
-    expect(params).toMatchObject({ reasoning_effort: 'high' })
+    expect(params).toMatchObject({ reasoning_effort: effort })
   })
 
   it('passes the current workspace cwd into session.create', async () => {

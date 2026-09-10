@@ -87,7 +87,7 @@ function renderPanel(onSelectModel = vi.fn()) {
     </QueryClientProvider>
   )
 
-  return { onSelectModel, content }
+  return { onSelectModel, content, requestGateway }
 }
 
 describe('ModelMenuPanel MoA presets', () => {
@@ -161,6 +161,28 @@ describe('ModelMenuPanel current selection', () => {
 
     expect(currentRow?.querySelector('.codicon-check')).not.toBeNull()
     expect(staleRow?.querySelector('.codicon-check')).toBeNull()
+  })
+
+  it('keeps a live-only session model active so Thinking Off reaches that session', async () => {
+    $currentProvider.set('deepseek')
+    $currentModel.set('deepseek-v4.1-flash-expires-on-0910')
+
+    const { content, requestGateway } = renderPanel()
+    const label = await content.findByText(/Deepseek V4\.1 Flash Expires On 0910/i)
+    const row = label.closest('[role="menuitem"]')
+
+    expect(row?.querySelector('.codicon-check')).not.toBeNull()
+
+    fireEvent.keyDown(row!, { key: 'ArrowRight' })
+    fireEvent.click(await screen.findByRole('switch'))
+
+    await vi.waitFor(() => {
+      expect(requestGateway).toHaveBeenCalledWith('config.set', {
+        key: 'reasoning',
+        session_id: 'runtime-1',
+        value: 'none'
+      })
+    })
   })
 })
 
