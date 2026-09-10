@@ -3156,6 +3156,18 @@ export const zhHant = defineLocale({
       statusRecovered: '已復原',
       statusDone: '完成',
       memoryWriteNoted: '已記下記憶寫入',
+      skill: {
+        instruction: {
+          done: skill => `已載入技能 ${skill}`,
+          failed: skill => `無法載入技能 ${skill}`,
+          pending: skill => `正在載入技能 ${skill}`
+        },
+        resource: {
+          done: (resource, skill) => `已讀取 ${skill} 的 ${resource}`,
+          failed: (resource, skill) => `無法讀取 ${skill} 的 ${resource}`,
+          pending: (resource, skill) => `正在讀取 ${skill} 的 ${resource}`
+        }
+      },
       actions: {
         read: '已讀取',
         reading: '正在讀取',

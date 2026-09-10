@@ -3852,6 +3852,18 @@ export const zh: Translations = {
       statusRecovered: '已恢复',
       statusDone: '完成',
       memoryWriteNoted: '已记下记忆写入',
+      skill: {
+        instruction: {
+          done: skill => `已加载技能 ${skill}`,
+          failed: skill => `无法加载技能 ${skill}`,
+          pending: skill => `正在加载技能 ${skill}`
+        },
+        resource: {
+          done: (resource, skill) => `已读取 ${skill} 的 ${resource}`,
+          failed: (resource, skill) => `无法读取 ${skill} 的 ${resource}`,
+          pending: (resource, skill) => `正在读取 ${skill} 的 ${resource}`
+        }
+      },
       actions: {
         read: '已读取',
         reading: '正在读取',

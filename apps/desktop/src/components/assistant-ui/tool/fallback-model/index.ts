@@ -5,6 +5,8 @@ import { capitalize, firstStringField, normalize } from '@/lib/text'
 import { isCardTool, isFileEditTool, isSilentTool } from '@/lib/tool-render-class'
 import { extractToolErrorMessage, formatToolResultSummary } from '@/lib/tool-result-summary'
 
+import { skillViewTitle } from '../skill-view-title'
+
 import {
   browserExecStepLabel,
   compactPreview,
@@ -1306,6 +1308,12 @@ function dynamicTitle(
 
   const titledAction = (action: string, title: string): ToolTitleParts =>
     titlePartsFromAction(title, part.result === undefined ? action : undefined)
+
+  if (part.toolName === 'skill_view') {
+    const title = skillViewTitle(part)
+
+    return title ? { title } : fallback
+  }
 
   if (part.toolName === 'web_extract') {
     const url = findFirstUrl(args, result)

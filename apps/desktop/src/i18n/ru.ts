@@ -3650,6 +3650,18 @@ export const ru = defineLocale({
       statusRecovered: 'Восстановлено',
       statusDone: 'Готово',
       memoryWriteNoted: 'Запись в память отмечена',
+      skill: {
+        instruction: {
+          done: skill => `Навык ${skill} загружен`,
+          failed: skill => `Не удалось загрузить навык ${skill}`,
+          pending: skill => `Загрузка навыка ${skill}`
+        },
+        resource: {
+          done: (resource, skill) => `Прочитан ${resource} из ${skill}`,
+          failed: (resource, skill) => `Не удалось прочитать ${resource} из ${skill}`,
+          pending: (resource, skill) => `Чтение ${resource} из ${skill}`
+        }
+      },
       actions: {
         read: 'Чтение',
         reading: 'Читает',

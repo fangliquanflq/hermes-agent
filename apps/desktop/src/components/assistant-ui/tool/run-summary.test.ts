@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { summarizeToolRun, type ToolCallLike } from './run-summary'
+import { summarizeToolRun, type ToolCallLike, toolRunIdentityKey } from './run-summary'
 
 function tool(toolName: string, args: Record<string, unknown> = {}, result?: unknown): ToolCallLike {
   return { args, result, toolCallId: `${toolName}-${Math.random()}`, toolName }
@@ -56,5 +56,21 @@ describe('summarizeToolRun', () => {
   // or it narrates work that stopped happening and never offers its toggle.
   it('reads a run the turn left unresolved as finished', () => {
     expect(settled([read('a.ts'), tool('search_files', { query: 'toolRuns' })])).toBe('Explored 2 files')
+  })
+
+  it('keeps skill and resource identities visible', () => {
+    expect(
+      settled([
+        tool('skill_view', { name: 'hermes-agent' }, { content: '...' }),
+        tool('skill_view', { file_path: 'references/api.md', name: 'hermes-agent' }, { content: '...' })
+      ])
+    ).toBe('Loaded skill hermes-agent, read references/api.md from hermes-agent')
+  })
+
+  it('keys only the small arguments that can change a summary', () => {
+    expect(toolRunIdentityKey(tool('skill_view', {}))).not.toBe(
+      toolRunIdentityKey(tool('skill_view', { name: 'hermes-agent' }))
+    )
+    expect(toolRunIdentityKey(tool('skill_view', { payload: 'x'.repeat(100_000) }))).toHaveLength(4)
   })
 })

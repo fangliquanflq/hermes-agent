@@ -72,7 +72,7 @@ import {
   type ToolStatus,
   type ToolTitleAction
 } from './fallback-model'
-import { isToolCallPart, summarizeToolRun } from './run-summary'
+import { isToolCallPart, summarizeToolRun, toolRunIdentityKey } from './run-summary'
 import { ToolRunTicker } from './run-ticker'
 
 // `true` when a ToolEntry is rendered inside an embedding wrapper that owns
@@ -798,7 +798,7 @@ export function splitRunItems(toolNames: readonly string[]): RunItem[] {
  */
 // The one grey line that stands in for a run of tool calls — "Explored 3
 // files, ran 5 commands". Live, it narrates in the present tense above the
-// ticker and offers no toggle, since there is nothing settled to unfold yet.
+// ticker and keeps an explicit toggle so the user can inspect work in progress.
 function ToolRunHeader({
   completedAt,
   live,
@@ -867,7 +867,7 @@ function useToolRun(startIndex: number, endIndex: number): ToolRunState {
     const signature = timelineTools
       .map(
         tool =>
-          `${tool.toolCallId}:${tool.result === undefined ? 0 : 1}:${tool.timestamp ?? ''}:${tool.completedAt ?? ''}`
+          `${tool.toolCallId}:${tool.result === undefined ? 0 : 1}:${tool.isError ? 1 : 0}:${tool.timestamp ?? ''}:${tool.completedAt ?? ''}:${toolRunIdentityKey(tool)}`
       )
       .concat(String(live))
       .join('|')
@@ -953,8 +953,8 @@ const ToolRun: FC<PropsWithChildren<{ endIndex: number; startIndex: number }>> =
   // keeps going. Either one hands the run back its full height until the run
   // settles and the row can be reached through the summary instead.
   const blocked = Boolean(approval) && pendingApprovalTool
-  const unfurled = blocked || rowOpen
-  const expanded = live ? unfurled : (persistedOpen ?? false)
+  const expanded = blocked || (persistedOpen ?? (live && rowOpen))
+  const toggle = blocked ? undefined : () => setToolDisclosureOpen(disclosureId, !expanded)
 
   return (
     <div
@@ -966,12 +966,12 @@ const ToolRun: FC<PropsWithChildren<{ endIndex: number; startIndex: number }>> =
       <ToolRunHeader
         completedAt={completedAt}
         live={live}
-        onToggle={live ? undefined : () => setToolDisclosureOpen(disclosureId, !expanded)}
+        onToggle={toggle}
         open={expanded}
         startedAt={startedAt}
         summary={summary}
       />
-      {live && !unfurled && <ToolRunTicker>{children}</ToolRunTicker>}
+      {live && !expanded && <ToolRunTicker>{children}</ToolRunTicker>}
       {expanded && <div className="grid min-w-0 max-w-full gap-(--tool-row-gap)">{children}</div>}
     </div>
   )

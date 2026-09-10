@@ -3717,6 +3717,18 @@ export const en: Translations = {
       statusRecovered: 'Recovered',
       statusDone: 'Done',
       memoryWriteNoted: 'Memory write noted',
+      skill: {
+        instruction: {
+          done: skill => `Loaded skill ${skill}`,
+          failed: skill => `Failed to load skill ${skill}`,
+          pending: skill => `Loading skill ${skill}`
+        },
+        resource: {
+          done: (resource, skill) => `Read ${resource} from ${skill}`,
+          failed: (resource, skill) => `Failed to read ${resource} from ${skill}`,
+          pending: (resource, skill) => `Reading ${resource} from ${skill}`
+        }
+      },
       actions: {
         read: 'Read',
         reading: 'Reading',

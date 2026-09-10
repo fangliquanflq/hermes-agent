@@ -2,6 +2,7 @@ import { summarizeShellCommand } from '@/lib/summarize-command'
 import { firstStringField } from '@/lib/text'
 
 import { fileEditBasename, isFileEditTool, parseMaybeObject } from './fallback-model'
+import { skillViewTitle } from './skill-view-title'
 
 /**
  * The little a summary needs from a tool call, stated structurally so both
@@ -10,6 +11,7 @@ import { fileEditBasename, isFileEditTool, parseMaybeObject } from './fallback-m
  */
 export interface ToolCallLike {
   args?: unknown
+  isError?: boolean
   result?: unknown
   toolCallId?: string
   toolName: string
@@ -19,18 +21,19 @@ export function isToolCallPart<T extends { type: string }>(part: T): part is Ext
   return part.type === 'tool-call'
 }
 
-type RunCategory = 'delegate' | 'edit' | 'explore' | 'other' | 'run'
+type RunCategory = 'delegate' | 'edit' | 'explore' | 'other' | 'run' | 'skill'
 
 // Clause order is fixed so the same run always reads the same way, whichever
 // category happens to be live.
-const CATEGORY_ORDER: readonly RunCategory[] = ['edit', 'explore', 'run', 'delegate', 'other']
+const CATEGORY_ORDER: readonly RunCategory[] = ['edit', 'explore', 'skill', 'run', 'delegate', 'other']
 
 const CATEGORY_COPY: Record<RunCategory, { noun: [string, string]; past: string; present: string }> = {
   delegate: { noun: ['task', 'tasks'], past: 'Delegated', present: 'Delegating' },
   edit: { noun: ['file', 'files'], past: 'Edited', present: 'Editing' },
   explore: { noun: ['file', 'files'], past: 'Explored', present: 'Exploring' },
   other: { noun: ['tool', 'tools'], past: 'Used', present: 'Using' },
-  run: { noun: ['command', 'commands'], past: 'Ran', present: 'Running' }
+  run: { noun: ['command', 'commands'], past: 'Ran', present: 'Running' },
+  skill: { noun: ['skill', 'skills'], past: 'Loaded', present: 'Loading' }
 }
 
 const EXPLORE_TOOLS = new Set([
@@ -54,6 +57,10 @@ function toolCategory(toolName: string): RunCategory {
 
   if (toolName === 'delegate_task') {
     return 'delegate'
+  }
+
+  if (toolName === 'skill_view') {
+    return 'skill'
   }
 
   if (EXPLORE_TOOLS.has(toolName) || toolName.startsWith('browser_')) {
@@ -111,6 +118,21 @@ function lowerFirst(text: string): string {
   return text.charAt(0).toLowerCase() + text.slice(1)
 }
 
+/** Small identifying fields that can change after tool.start without hashing payloads. */
+export function toolRunIdentityKey(tool: ToolCallLike): string {
+  const args = parseMaybeObject(tool.args)
+
+  const fields = [
+    firstStringField(args, ['name']),
+    firstStringField(args, ['file_path']),
+    firstStringField(args, ['path', 'file', 'filepath']),
+    firstStringField(args, ['query', 'url']),
+    firstStringField(args, ['command', 'code'])
+  ]
+
+  return fields.map(value => value.slice(0, 160)).join('\u0001')
+}
+
 /**
  * Collapse a run of tool calls into the single grey line that stands in for it
  * — "Explored 3 files, ran 5 commands". While the run is live, the category
@@ -150,7 +172,15 @@ export function summarizeToolRun(tools: readonly ToolCallLike[], live: boolean):
   const clauses = CATEGORY_ORDER.flatMap(category => {
     const group = byCategory.get(category)
 
-    return group ? [clause(category, group, category === liveCategory)] : []
+    if (!group) {
+      return []
+    }
+
+    if (category === 'skill') {
+      return group.map(tool => skillViewTitle(tool) || clause(category, [tool], category === liveCategory))
+    }
+
+    return [clause(category, group, category === liveCategory)]
   })
 
   return clauses.map((text, index) => (index === 0 ? text : lowerFirst(text))).join(', ')

@@ -478,14 +478,23 @@ describe('live tool run', () => {
     })
   })
 
-  it('cannot be collapsed while a tool is still running', async () => {
+  it('can be explicitly expanded and collapsed while a tool is still running', async () => {
     const { container } = render(<GroupHarness message={groupedPendingMessage()} />)
 
     await waitFor(() => {
       expect(container.querySelector('[data-tool-summary]')).not.toBeNull()
     })
 
-    expect(container.querySelector('[data-tool-summary] button[aria-expanded]')).toBeNull()
+    const toggle = container.querySelector('[data-tool-summary] button[aria-expanded="false"]')
+
+    expect(toggle).not.toBeNull()
+    fireEvent.click(toggle as Element)
+    expect(container.querySelector('[data-tool-summary] button[aria-expanded="true"]')).not.toBeNull()
+    expect(container.querySelector('[data-tool-ticker]')).toBeNull()
+
+    fireEvent.click(container.querySelector('[data-tool-summary] button[aria-expanded="true"]') as Element)
+    expect(container.querySelector('[data-tool-summary] button[aria-expanded="false"]')).not.toBeNull()
+    expect(container.querySelector('[data-tool-ticker]')).not.toBeNull()
   })
 
   // Liveness used to also require an unresolved call, which is false for the
@@ -497,7 +506,7 @@ describe('live tool run', () => {
 
     expect(await screen.findByText('Running 2 commands')).toBeTruthy()
     expect(container.querySelector('[data-tool-ticker]')).not.toBeNull()
-    expect(container.querySelector('[data-tool-summary] button[aria-expanded]')).toBeNull()
+    expect(container.querySelector('[data-tool-summary] button[aria-expanded="false"]')).not.toBeNull()
   })
 
   // The ticker is a one-line window, so a row opened inside it had its output
@@ -521,11 +530,94 @@ describe('live tool run', () => {
     // ...and the row it opened is still on screen to be read.
     expect(container.querySelector('[data-tool-row][data-tool-open]')).not.toBeNull()
   })
+
+  it('keeps explicit disclosure intent as calls arrive and the run settles', async () => {
+    const running = groupedPendingMessage()
+    const parts = running.content as unknown as Record<string, unknown>[]
+    const { container, rerender } = render(<GroupHarness message={running} />)
+
+    const toggle = await waitFor(() => {
+      const button = container.querySelector('[data-tool-summary] button[aria-expanded="false"]')
+
+      expect(button).not.toBeNull()
+
+      return button as Element
+    })
+
+    fireEvent.click(toggle)
+    expect(container.querySelector('[data-tool-summary] button[aria-expanded="true"]')).not.toBeNull()
+
+    const withAnotherCall = {
+      ...running,
+      content: [
+        ...parts,
+        {
+          type: 'tool-call',
+          toolCallId: 'read-late',
+          toolName: 'read_file',
+          args: { path: '/repo/late.ts' },
+          argsText: JSON.stringify({ path: '/repo/late.ts' })
+        }
+      ]
+    } as unknown as ThreadMessage
+
+    rerender(<GroupHarness message={withAnotherCall} />)
+    await waitFor(() =>
+      expect(container.querySelector('[data-tool-summary] button[aria-expanded="true"]')).not.toBeNull()
+    )
+
+    const settled = {
+      ...withAnotherCall,
+      content: (withAnotherCall.content as unknown as Record<string, unknown>[]).map(part =>
+        part.type === 'tool-call' && part.result === undefined ? { ...part, result: {} } : part
+      ),
+      status: { reason: 'stop', type: 'complete' }
+    } as unknown as ThreadMessage
+
+    rerender(<GroupHarness message={settled} />)
+    await waitFor(() =>
+      expect(container.querySelector('[data-tool-summary] button[aria-expanded="true"]')).not.toBeNull()
+    )
+  })
+
+  it('refreshes a cached skill summary when identifying arguments arrive late', async () => {
+    const message = settledRunMessage()
+    const parts = message.content as unknown as Record<string, unknown>[]
+
+    const sparse = {
+      ...message,
+      content: [
+        { args: {}, result: { content: '...' }, toolCallId: 'skill-late', toolName: 'skill_view', type: 'tool-call' },
+        parts[1]
+      ]
+    } as unknown as ThreadMessage
+
+    const { rerender } = render(<GroupHarness message={sparse} />)
+
+    expect(await screen.findByText('Loaded 1 skill, ran 1 command')).toBeTruthy()
+
+    const identified = {
+      ...sparse,
+      content: [
+        {
+          args: { file_path: 'references/api.md', name: 'hermes-agent' },
+          result: { content: '...' },
+          toolCallId: 'skill-late',
+          toolName: 'skill_view',
+          type: 'tool-call'
+        },
+        parts[1]
+      ]
+    } as unknown as ThreadMessage
+
+    rerender(<GroupHarness message={identified} />)
+
+    expect(await screen.findByText('Read references/api.md from hermes-agent, ran 1 command')).toBeTruthy()
+  })
 })
 
 // A run whose calls never resolved used to read as live forever, which stranded
-// it in the present tense and — because a live run withholds its toggle — left
-// it permanently expanded with no way to collapse it.
+// it in the present tense and left the transcript claiming work was still active.
 describe('tool run left unresolved', () => {
   it('settles with the turn rather than narrating work that stopped', async () => {
     const { container } = render(<GroupHarness message={abandonedRunMessage()} />)
@@ -566,6 +658,7 @@ describe('flat tool list approval surfacing', () => {
       // Flat rows live directly in the flow — nothing should ever wrap the bar
       // in a `hidden` subtree.
       expect(bar?.closest('[hidden]')).toBeNull()
+      expect(container.querySelector('[data-tool-summary] button[aria-expanded]')).toBeNull()
     })
   })
 

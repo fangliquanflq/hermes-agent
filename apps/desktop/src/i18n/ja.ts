@@ -3267,6 +3267,18 @@ export const ja = defineLocale({
       statusRecovered: '回復しました',
       statusDone: '完了',
       memoryWriteNoted: 'メモリへの書き込みを記録',
+      skill: {
+        instruction: {
+          done: skill => `スキル ${skill} を読み込みました`,
+          failed: skill => `スキル ${skill} の読み込みに失敗しました`,
+          pending: skill => `スキル ${skill} を読み込み中`
+        },
+        resource: {
+          done: (resource, skill) => `${skill} の ${resource} を読み取りました`,
+          failed: (resource, skill) => `${skill} の ${resource} の読み取りに失敗しました`,
+          pending: (resource, skill) => `${skill} の ${resource} を読み取り中`
+        }
+      },
       actions: {
         read: '読み取り完了',
         reading: '読み取り中',

@@ -148,6 +148,34 @@ describe('buildToolView web-search query', () => {
   })
 })
 
+describe('buildToolView skill_view titles', () => {
+  it('names instruction loads, resource reads, and failures', () => {
+    expect(
+      buildToolView(part({ args: { name: 'hermes-agent' }, result: undefined, toolName: 'skill_view' }), '').title
+    ).toBe('Loading skill hermes-agent')
+    expect(
+      buildToolView(part({ args: { name: 'hermes-agent' }, result: { content: '...' }, toolName: 'skill_view' }), '')
+        .title
+    ).toBe('Loaded skill hermes-agent')
+    expect(
+      buildToolView(
+        part({
+          args: { file_path: 'references/api.md', name: 'hermes-agent' },
+          result: { content: '...' },
+          toolName: 'skill_view'
+        }),
+        ''
+      ).title
+    ).toBe('Read references/api.md from hermes-agent')
+    expect(
+      buildToolView(
+        part({ args: { name: 'missing' }, result: { error: 'not found', success: false }, toolName: 'skill_view' }),
+        ''
+      ).title
+    ).toBe('Failed to load skill missing')
+  })
+})
+
 describe('buildToolView browser_navigate title', () => {
   it('shows failed title when navigate returns success=false', () => {
     const view = buildToolView(

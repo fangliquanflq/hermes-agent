@@ -3250,6 +3250,18 @@ export interface Translations {
       statusDone: string
       /** Over-budget / rejected memory write title — not "Saved to memory". */
       memoryWriteNoted: string
+      skill: {
+        instruction: {
+          done: (skill: string) => string
+          failed: (skill: string) => string
+          pending: (skill: string) => string
+        }
+        resource: {
+          done: (resource: string, skill: string) => string
+          failed: (resource: string, skill: string) => string
+          pending: (resource: string, skill: string) => string
+        }
+      }
       actions: {
         read: string
         reading: string

@@ -2810,6 +2810,18 @@ export const ar = defineLocale({
       statusRecovered: 'تم الاسترداد',
       statusDone: 'تم',
       memoryWriteNoted: 'تم تسجيل كتابة الذاكرة',
+      skill: {
+        instruction: {
+          done: skill => `تم تحميل المهارة ${skill}`,
+          failed: skill => `تعذر تحميل المهارة ${skill}`,
+          pending: skill => `جارٍ تحميل المهارة ${skill}`
+        },
+        resource: {
+          done: (resource, skill) => `تمت قراءة ${resource} من ${skill}`,
+          failed: (resource, skill) => `تعذرت قراءة ${resource} من ${skill}`,
+          pending: (resource, skill) => `جارٍ قراءة ${resource} من ${skill}`
+        }
+      },
       actions: {
         read: 'قراءة',
         reading: 'جار القراءة',
