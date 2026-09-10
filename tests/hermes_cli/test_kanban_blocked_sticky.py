@@ -77,6 +77,28 @@ def test_worker_block_is_not_auto_promoted_by_recompute_ready(kanban_home: Path)
             assert kb.get_task(conn, tid).status == "blocked"
 
 
+def test_initially_blocked_child_stays_blocked_when_parent_completes(
+    kanban_home: Path,
+) -> None:
+    """Creation-time human gates remain sticky until explicitly unblocked."""
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        child = kb.create_task(
+            conn,
+            title="human approval",
+            parents=[parent],
+            initial_status="blocked",
+        )
+
+        kb.claim_task(conn, parent, claimer="worker")
+        kb.complete_task(conn, parent, result="done")
+
+        assert kb.recompute_ready(conn) == 0
+        assert kb.get_task(conn, child).status == "blocked"
+        assert kb.unblock_task(conn, child)
+        assert kb.get_task(conn, child).status == "ready"
+
+
 
 
 # ---------------------------------------------------------------------------

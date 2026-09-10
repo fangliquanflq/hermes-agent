@@ -1956,22 +1956,22 @@ def _synthesize_ended_run(
 # --- Dependency resolution (todo -> ready) ---
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """True when the newest ``blocked``/``unblocked`` event is ``blocked`` — an
-    explicit ``kanban_block`` that must wait for an operator. A breaker trip
-    emits ``gave_up`` (not ``blocked``) and so auto-recovers, as does a task
-    with no such event at all (direct DB edit).
+    """True when the latest human-gate lifecycle event leaves the task blocked.
 
-    See #28712.
-    Returns ``False`` when there is no such event at all (e.g. the task was set to ``status='blocked'`` by
-    the circuit breaker or by direct DB manipulation) — preserves the pre-#28712 auto-recover semantics for
-    that path.
+    Explicit ``kanban_block`` events and creation with ``initial_status="blocked"``
+    are sticky until an ``unblocked`` event. A breaker trip emits ``gave_up``
+    instead, so it still auto-recovers; direct DB edits also remain recoverable.
     """
     row = conn.execute(
-        "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "SELECT kind, payload FROM task_events "
+        "WHERE task_id = ? AND kind IN ('created', 'blocked', 'unblocked') "
         "ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] == "blocked"
+    if not row or row["kind"] == "unblocked":
+        return False
+    if row["kind"] == "blocked":
+        return True
+    return _json_dict(row["payload"]).get("status") == "blocked"
 
 
 def _latest_event(
@@ -2008,13 +2008,11 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
     returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
 
-    ``blocked`` is skipped when sticky (explicit ``kanban_block``) or when
-    ``consecutive_failures`` reached the limit (else the breaker could never
-    trip). Limit order matches ``_record_task_failure``: ``max_retries`` >
-    ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``.
-
-    1. The most recent block event was a worker-initiated ``kanban_block`` — those stay blocked until an
-    explicit ``kanban_unblock`` (#28712).
+    ``blocked`` is skipped when sticky (explicit ``kanban_block`` or
+    ``initial_status="blocked"``) or when ``consecutive_failures`` reached the
+    limit (else the breaker could never trip). Limit order matches
+    ``_record_task_failure``: ``max_retries`` > ``failure_limit`` >
+    ``DEFAULT_FAILURE_LIMIT``.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
