@@ -979,6 +979,29 @@ class TestToolsetsEndpoint:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+        ("/v1/responses", {"input": "hi"}),
+    ],
+)
+async def test_openai_routes_pass_request_metadata_to_relay_turn(adapter, path, payload):
+    metadata = {"request_id": "request-123", "tenant": "acme"}
+    app = _create_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+            mock_run.return_value = (
+                {"final_response": "ok", "messages": [], "api_calls": 1},
+                {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            )
+            resp = await cli.post(path, json={**payload, "model": "hermes-agent", "metadata": metadata})
+
+    assert resp.status == 200
+    assert mock_run.call_args.kwargs["relay_metadata"] == metadata
+
+
 class TestChatCompletionsEndpoint:
     @pytest.mark.asyncio
     async def test_invalid_json_returns_400(self, adapter):

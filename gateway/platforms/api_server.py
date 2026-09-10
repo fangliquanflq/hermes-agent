@@ -345,6 +345,12 @@ def _request_agent_overrides(
     return overrides
 
 
+def _request_relay_metadata(body: Any) -> Optional[Dict[str, Any]]:
+    """Copy OpenAI request metadata for the request's Relay turn scope."""
+    metadata = body.get("metadata") if isinstance(body, dict) else None
+    return dict(metadata) if isinstance(metadata, dict) else None
+
+
 def _is_compressed_summary_message(message: Any) -> bool:
     """Recognize every compaction carrier shape via the compressor's own classifier
     (SessionDB drops the in-process marker; a prefix scan misses merge-into-tail carriers)."""
@@ -3626,7 +3632,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         route: Optional[Dict[str, Any]] = None, session_model: Optional[str] = None,
         requested_runtime: Optional[Dict[str, Any]] = None, route_source: str = "global",
         confirmed_runtime_lock: bool = False, bind_declared_conversation: bool = False,
-        session_history_delivery: str = "") -> tuple:
+        session_history_delivery: str = "", relay_metadata: Optional[Dict[str, Any]] = None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``agent_ref[0]`` receives the agent so SSE writers can interrupt it; ``active_run_id``
         registers it in ``_active_run_agents``. Under a confirmed model lock the actual
@@ -3677,9 +3683,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     # two callers pass ``agent_ref``, and only /v1/runs has a run_id, so neither is a usable
                     # hook for the rest. See #63529.
                     self._shutdown_interruptible_agents[id(agent)] = agent
-                    result = agent.run_conversation(
+                    conversation_kwargs = dict(
                         user_message=user_message, conversation_history=conversation_history,
                         task_id=effective_task_id)
+                    if relay_metadata is not None:
+                        conversation_kwargs["relay_metadata"] = relay_metadata
+                    result = agent.run_conversation(**conversation_kwargs)
                     return self._finish_turn_result(
                         agent, result, session_id, route=route, requested_runtime=requested_runtime,
                         route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)

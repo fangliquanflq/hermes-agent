@@ -3031,7 +3031,7 @@ class TestRunConversation:
         agent.compression_enabled = False
         agent.save_trajectories = False
 
-    def test_task_start_failure_closes_relay_turn_and_lease(self, agent):
+    def test_task_start_failure_closes_relay_turn_and_preserves_request_metadata(self, agent):
         relay_lease = SimpleNamespace(
             parent_session_id="",
             profile_key="/profile",
@@ -3042,6 +3042,7 @@ class TestRunConversation:
         coordinator.acquire_conversation.return_value = relay_lease
         coordinator.begin_turn.return_value = relay_turn
         start_error = RuntimeError("task metrics start failed")
+        request_metadata = {"request_id": "request-123"}
 
         with (
             patch("agent.relay_runtime.SESSION_COORDINATOR", coordinator),
@@ -3059,11 +3060,14 @@ class TestRunConversation:
             patch("agent.conversation_loop.run_conversation") as run_conversation,
         ):
             with pytest.raises(RuntimeError) as caught:
-                agent.run_conversation("hello", task_id="task-1")
+                agent.run_conversation(
+                    "hello", task_id="task-1", relay_metadata=request_metadata,
+                )
 
         assert caught.value is start_error
         run_conversation.assert_not_called()
         finish_task_run.assert_not_called()
+        assert coordinator.begin_turn.call_args.kwargs["metadata"] == request_metadata
         coordinator.finish_logical_calls.assert_called_once_with(
             relay_turn,
             outcome="failed",

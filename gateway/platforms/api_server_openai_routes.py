@@ -412,7 +412,8 @@ class OpenAICompatRoutesMixin:
             ThreadSafeAsyncQueue, _chat_usage_payload, _coerce_request_bool,
             _content_has_visible_payload, _derive_chat_session_id, _error_response, _invalid_request,
             _multimodal_validation_error, _normalize_chat_content, _normalize_multimodal_content,
-            _openai_error, _redact_api_error_text, _resolve_media_to_data_urls)
+            _openai_error, _redact_api_error_text, _request_relay_metadata,
+            _resolve_media_to_data_urls)
         # Bound total in-flight agent runs (configurable; #7483).
         limited = self._concurrency_limited_response()
         if limited is not None:
@@ -502,6 +503,7 @@ class OpenAICompatRoutesMixin:
             user_message=user_message, conversation_history=history,
             ephemeral_system_prompt=system_prompt, session_id=session_id,
             gateway_session_key=gateway_session_key, **agent_overrides, route=route,
+            relay_metadata=_request_relay_metadata(body),
             # #98619: only an explicitly provided X-Hermes-Session-Id is wake-capable (the
             # header is 403-gated on API_SERVER_KEY, so the wake self-post can authenticate
             # and the client can resume the session by sending it again). A fingerprint-derived
@@ -551,7 +553,8 @@ class OpenAICompatRoutesMixin:
             return await self._run_agent(**run_kwargs)
         outcome, err = await self._run_idempotent(
             request, body, _compute_completion, log_label="chat completions",
-            fingerprint_keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream"],
+            fingerprint_keys=[
+                "model", "provider", "model_options", "messages", "tools", "tool_choice", "stream", "metadata"],
         )
         if err is not None:
             return err
@@ -754,7 +757,7 @@ class OpenAICompatRoutesMixin:
             ThreadSafeAsyncQueue, _auto_truncate_response_history, _coerce_request_bool,
             _content_has_visible_payload, _error_response, _invalid_request,
             _multimodal_validation_error, _normalize_multimodal_content, _redact_api_error_text,
-            _resolve_media_to_data_urls, _responses_usage_payload)
+            _request_relay_metadata, _resolve_media_to_data_urls, _responses_usage_payload)
         # Bound total in-flight agent runs (configurable; #7483).
         limited = self._concurrency_limited_response()
         if limited is not None:
@@ -846,7 +849,7 @@ class OpenAICompatRoutesMixin:
             user_message=user_message, conversation_history=conversation_history,
             ephemeral_system_prompt=instructions, session_id=session_id,
             gateway_session_key=gateway_session_key, bind_declared_conversation=_declared_selected,
-            **agent_overrides, route=route)
+            **agent_overrides, route=route, relay_metadata=_request_relay_metadata(body))
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
 
@@ -878,7 +881,9 @@ class OpenAICompatRoutesMixin:
             return await self._run_agent(**run_kwargs)
         outcome, err = await self._run_idempotent(
             request, body, _compute_response, log_label="responses",
-            fingerprint_keys=["input", "instructions", "previous_response_id", "conversation", "model", "provider", "model_options", "tools"],
+            fingerprint_keys=[
+                "input", "instructions", "previous_response_id", "conversation", "model", "provider",
+                "model_options", "tools", "metadata"],
         )
         if err is not None:
             return err
