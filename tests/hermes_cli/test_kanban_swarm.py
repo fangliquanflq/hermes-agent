@@ -1,5 +1,9 @@
+import argparse
+import json
+
 import pytest
 
+from hermes_cli import kanban as kanban_cli
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.kanban_swarm import (
@@ -17,7 +21,13 @@ def test_create_swarm_builds_parallel_workers_verifier_and_synthesizer(tmp_path)
             conn,
             goal="Map the target market and produce a decision memo.",
             workers=[
-                SwarmWorkerSpec(profile="researcher-a", title="Market scan", body="Find competitors"),
+                SwarmWorkerSpec(
+                    profile="researcher-a",
+                    title="Market scan",
+                    body="Find competitors",
+                    goal_mode=True,
+                    goal_max_turns=7,
+                ),
                 SwarmWorkerSpec(profile="researcher-b", title="Customer scan", body="Find customer pains"),
             ],
             verifier_assignee="reviewer",
@@ -40,6 +50,10 @@ def test_create_swarm_builds_parallel_workers_verifier_and_synthesizer(tmp_path)
         assert root.assignee == "orchestrator"
         assert [task.status for task in workers] == ["ready", "ready"]
         assert [task.assignee for task in workers] == ["researcher-a", "researcher-b"]
+        assert [task.goal_mode for task in workers] == [True, False]
+        assert [task.goal_max_turns for task in workers] == [7, None]
+        assert verifier.goal_mode is False
+        assert synthesizer.goal_mode is False
         assert verifier.status == "todo"
         assert synthesizer.status == "todo"
         assert set(kb.parent_ids(conn, created.verifier_id)) == set(created.worker_ids)
@@ -47,6 +61,39 @@ def test_create_swarm_builds_parallel_workers_verifier_and_synthesizer(tmp_path)
         assert all(created.root_id in (task.body or "") for task in workers)
     finally:
         conn.close()
+
+
+def test_swarm_cli_applies_goal_mode_to_workers_only(capsys):
+    parser = argparse.ArgumentParser()
+    kanban_cli.build_parser(parser.add_subparsers())
+    args = parser.parse_args([
+        "kanban",
+        "swarm",
+        "Research and report",
+        "--worker",
+        "researcher:Research",
+        "--worker-goal",
+        "--worker-goal-max-turns",
+        "9",
+        "--verifier",
+        "reviewer",
+        "--synthesizer",
+        "writer",
+        "--json",
+    ])
+
+    assert kanban_cli.kanban_command(args) == 0
+    created = json.loads(capsys.readouterr().out)
+    with kbc.connect_closing() as conn:
+        worker = kb.get_task(conn, created["worker_ids"][0])
+        verifier = kb.get_task(conn, created["verifier_id"])
+        synthesizer = kb.get_task(conn, created["synthesizer_id"])
+
+    assert worker is not None
+    assert worker.goal_mode is True
+    assert worker.goal_max_turns == 9
+    assert verifier is not None and verifier.goal_mode is False
+    assert synthesizer is not None and synthesizer.goal_mode is False
 
 
 def test_create_swarm_graph_is_atomic_and_rolls_back_partial_build(

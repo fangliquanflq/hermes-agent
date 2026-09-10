@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from dataclasses import replace
 import json
 import os
 import shlex
@@ -393,7 +394,14 @@ def _cmd_create(args: argparse.Namespace) -> int:
 
 def _cmd_swarm(args: argparse.Namespace) -> int:
     try:
-        workers = [ks.parse_worker_arg(raw) for raw in (args.worker or [])]
+        workers = [
+            replace(
+                ks.parse_worker_arg(raw),
+                goal_mode=bool(getattr(args, "worker_goal", False)),
+                goal_max_turns=getattr(args, "worker_goal_max_turns", None),
+            )
+            for raw in (args.worker or [])
+        ]
     except ValueError as exc:
         return _err(f"kanban swarm: {exc}", 2)
     if not workers:
