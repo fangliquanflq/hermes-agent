@@ -572,6 +572,26 @@ class TestProtectedInstructionFiles:
         assert not res.get("error"), res
         assert approvals["calls"] == []
 
+    def test_profile_switch_rebinds_home_exemption_and_config_block(self, tmp_path):
+        import tools.file_tools_write_guards as ft
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        homes = [tmp_path / name for name in ("alpha", "beta")]
+        for home in homes:
+            (home / "workspace").mkdir(parents=True)
+            (home / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+
+        for home in homes:
+            token = set_hermes_home_override(home)
+            try:
+                own_agents = home / "workspace" / "AGENTS.md"
+                assert ft._protected_instruction_reason(
+                    str(own_agents), enabled=True, extra_patterns=[]
+                ) is None
+                assert "Hermes config" in ft._check_sensitive_path(str(home / "config.yaml"))
+            finally:
+                reset_hermes_home_override(token)
+
     # ---- patch tool -----------------------------------------------------
 
     def test_patch_replace_mode_is_gated(self, tmp_path, approvals):

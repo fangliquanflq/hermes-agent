@@ -24,31 +24,15 @@ _SENSITIVE_PATH_PREFIXES = (
     "/private/var/db/", "/private/var/root/")
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
-_hermes_config_resolved: str | None = None
-_hermes_config_resolved_loaded = False
-_real_hermes_home_cached: str | None = None
-_real_hermes_home_loaded = False
-
-
-def _cached_lookup(slot: str, flag: str, primary, fallback) -> str | None:
-    """Fill module global *slot* once (guarded by *flag*) from ``primary()``, else
-    ``fallback()``, else None. Module globals so tests can monkeypatch the slots."""
-    g = globals()
-    if not g[flag]:
-        g[flag] = True
+def _resolved_lookup(primary, fallback) -> str | None:
+    """Resolve a profile-scoped path from ``primary()``, then ``fallback()``."""
+    try:
+        return primary()
+    except Exception:
         try:
-            g[slot] = primary()
+            return fallback()
         except Exception:
-            try:
-                g[slot] = fallback()
-            except Exception:
-                g[slot] = None
-    return g[slot]
-
-
-def _config_path_resolved() -> str:
-    from hermes_cli.config import get_config_path
-    return str(get_config_path().resolve())
+            return None
 
 
 def _hermes_home_real() -> str:
@@ -57,15 +41,15 @@ def _hermes_home_real() -> str:
 
 
 def _get_hermes_config_resolved() -> str | None:
-    """Return the resolved absolute path of the Hermes config file (cached)."""
-    return _cached_lookup("_hermes_config_resolved", "_hermes_config_resolved_loaded", _config_path_resolved,
-                          lambda: str(Path(_expand_tilde("~/.hermes/config.yaml")).resolve()))
+    """Return the current profile's resolved Hermes config path."""
+    return _resolved_lookup(lambda: str((Path(_hermes_home_real()) / "config.yaml").resolve()),
+                            lambda: str(Path(_expand_tilde("~/.hermes/config.yaml")).resolve()))
 
 
 def _get_real_hermes_home() -> str | None:
-    """Return the realpath of the authoritative Hermes home (cached)."""
-    return _cached_lookup("_real_hermes_home_cached", "_real_hermes_home_loaded", _hermes_home_real,
-                          lambda: os.path.realpath(_expand_tilde("~/.hermes")))
+    """Return the realpath of the current profile's authoritative Hermes home."""
+    return _resolved_lookup(_hermes_home_real,
+                            lambda: os.path.realpath(_expand_tilde("~/.hermes")))
 
 
 def _resolved_or_raw(filepath: str, task_id: str) -> str:
