@@ -453,6 +453,31 @@ class TestStatusBarFieldConfig:
             text = cli_obj._build_status_bar_text(width=120)
         assert "Σ" not in text
 
+    def test_account_field_tracks_exact_active_pool_entry(self):
+        cli_obj = _attach_agent(
+            _make_cli(), prompt_tokens=10_230, completion_tokens=2_220,
+            total_tokens=12_450, api_calls=7, context_tokens=12_450,
+            context_length=200_000,
+        )
+        cli_obj.agent._credential_pool = SimpleNamespace(entries=lambda: [
+            SimpleNamespace(id="personal", label="personal@example.com", access_token="secret-personal"),
+            SimpleNamespace(id="work", label="work@example.com", access_token="secret-work"),
+        ])
+        cli_obj.agent._credential_pool_entry_id = "personal"
+
+        with patch.object(cli_mod, "CLI_CONFIG", {
+            "display": {"status_bar": {"fields": ["account", "model"]}}
+        }):
+            first = cli_obj._build_status_bar_text(width=120)
+            cli_obj.agent._credential_pool_entry_id = "work"
+            rotated = cli_obj._build_status_bar_text(width=120)
+            narrow = cli_obj._build_status_bar_text(width=60)
+
+        assert "@ personal@example.com" in first
+        assert "@ work@example.com" in rotated
+        assert "secret-" not in first + rotated
+        assert "@ work@example.com" not in narrow
+
     def test_narrow_terminal_drops_context_detail(self):
         """Narrow terminal (<76) ignores context_detail even if configured."""
         text = self._cli_with_fields(["model", "context_detail", "duration"], width=60)

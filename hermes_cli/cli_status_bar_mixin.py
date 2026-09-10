@@ -191,6 +191,7 @@ class CLIStatusBarMixin:
         snapshot = {
             "model_name": model_name,
             "model_short": model_short,
+            "account_label": "",
             "duration": format_duration_compact(elapsed_seconds),
             "session_title": self._get_status_bar_session_title(),
             "prompt_elapsed": self._format_prompt_elapsed(
@@ -264,6 +265,13 @@ class CLIStatusBarMixin:
 
         if not agent:
             return snapshot
+
+        try:
+            from agent.credential_display import active_credential_label
+
+            snapshot["account_label"] = active_credential_label(agent)
+        except Exception:
+            pass
 
         for key in _AGENT_COUNTERS:
             snapshot[key] = getattr(agent, key, 0) or 0
@@ -954,7 +962,7 @@ class CLIStatusBarMixin:
         """Visible status-bar fields from ``display.status_bar.fields`` (module-level
         ``CLI_CONFIG``; no per-render YAML parse). ``None`` = not customized, show everything.
 
-        Fields: model, context_detail, context_pct, cache_hit, latency, tps, compressions,
+        Fields: account, model, context_detail, context_pct, cache_hit, latency, tps, compressions,
         bg_tasks, bg_processes, bg_subagents, goal, duration, prompt_elapsed, idle_since,
         focus, yolo, stash, battery, title, total_tokens (opt-in only). Order is fixed; the
         config controls visibility only.
@@ -999,12 +1007,17 @@ class CLIStatusBarMixin:
             if count:
                 add(name, style(count) if callable(style) else style, f"{glyph} {count}")
 
+        narrow, wide = width < 52, width >= 76
+        account_label = snapshot.get("account_label") or ""
+        # Account identity is opt-in and non-essential: never consume scarce
+        # space on narrow/medium terminals.
+        if wide and account_label and field_set is not None and "account" in field_set:
+            segs.append([(_DIM, f"@ {account_label}")])
         if _ok("model"):
             if styled:
                 segs.append([(_SB, " ⚕ "), (_STRONG, model_short)])
             else:
                 segs.append([("", f"⚕ {model_short}")])
-        narrow, wide = width < 52, width >= 76
         if narrow:
             # Narrow bars put duration ahead of the goal segment; the other tiers reverse it.
             add("duration", _DIM, duration_label)

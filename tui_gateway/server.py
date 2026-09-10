@@ -2059,9 +2059,19 @@ def _session_info(agent, session: dict | None = None) -> dict:
     pending_switch = sess.get("pending_model_switch") or {}
     pending_model = str(pending_switch.get("display_model") or "").strip()
     pending_provider = str(pending_switch.get("display_provider") or "").strip()
+    account_label = ""
+    if agent is not None:
+        with contextlib.suppress(Exception):
+            from agent.credential_display import active_credential_label
+            account_label = active_credential_label(agent)
+    displayed_account_label = (
+        account_label if agent is not None and not sess.get("_compute_host_active")
+        else mirror.get("account_label", "")
+    )
     info: dict = {
         "model": pending_model or mirror.get("model", getattr(agent, "model", "")),
         "provider": pending_provider or mirror.get("provider", getattr(agent, "provider", "")),
+        "account_label": displayed_account_label,
         "reasoning_effort": reasoning_effort, "service_tier": service_tier, "fast": service_tier == "priority",
         "yolo": yolo, "approval_mode": approval_mode,
         "tools": dict(mirror.get("tools") or {}) if isinstance(mirror.get("tools"), dict) else {},
@@ -3006,17 +3016,27 @@ def _start_usage_ticker(sid: str, agent, interval: float = 1.0) -> tuple[threadi
     # Dedup baseline sampled BEFORE the thread starts (the client has the turn-start values); a late-scheduled
     # thread would otherwise absorb the first counter growth and never emit it.
     baseline: dict | None = None
+    account_label = ""
     with contextlib.suppress(Exception):
         baseline = _get_usage(agent)
+    with contextlib.suppress(Exception):
+        from agent.credential_display import active_credential_label
+        account_label = active_credential_label(agent)
 
     def _loop() -> None:
-        last = baseline
+        last_usage = baseline
+        last_account_label = account_label
         while not stop.wait(interval):
             with contextlib.suppress(Exception):
                 usage = _get_usage(agent)
-                if usage == last:
+                from agent.credential_display import active_credential_label
+                current_account_label = active_credential_label(agent)
+                if current_account_label != last_account_label:
+                    last_account_label = current_account_label
+                    _emit("session.info", sid, _session_info(agent))
+                if usage == last_usage:
                     continue  # counters frozen (one long API call in flight): don't re-render the status bar
-                last = usage
+                last_usage = usage
                 if stop.is_set():
                     break  # turn ended while snapshotting; message.complete carries the authoritative usage
                 _emit("session.usage", sid, {"usage": usage})

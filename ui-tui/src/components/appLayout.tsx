@@ -495,6 +495,7 @@ const StatusRulePane = memo(function StatusRulePane({
   return (
     <Box marginTop={at === 'top' ? 1 : 0}>
       <StatusRule
+        accountLabel={ui.info?.account_label}
         battery={ui.battery ? ui.batteryStatus : null}
         bgCount={ui.bgTasks.size}
         busy={ui.busy}

@@ -188,6 +188,7 @@ export interface ProjectInfo {
 }
 
 export interface SessionInfo {
+  account_label?: string
   cwd?: string
   fast?: boolean
   install_warning?: string

@@ -303,6 +303,7 @@ export function statusRuleWidths(cols: number, cwdLabel: string, minLeftContent 
 // breakpoint the context read-out collapses to a bare token count. Status and
 // model are never gated here — they're guaranteed room by `statusRuleWidths`.
 export interface StatusBarSegments {
+  account: boolean
   bar: boolean
   bg: boolean
   cacheHit: boolean
@@ -319,6 +320,7 @@ export function statusBarSegments(cols: number): StatusBarSegments {
   const w = Math.max(1, Math.floor(cols || 1))
 
   return {
+    account: w >= 76,
     compactCtx: w < 72,
     bar: w >= 72,
     duration: w >= 76,
@@ -484,6 +486,7 @@ export function GoodVibesHeart({ tick, t }: { tick: number; t: Theme }) {
 }
 
 export function StatusRule({
+  accountLabel,
   battery,
   focusView,
   cwdLabel,
@@ -605,6 +608,9 @@ export function StatusRule({
       : ''
 
   const showBar = !!bar && fits(SEP + stringWidth(`[${bar}] ${pct != null ? `${contextMark}${pct}%` : ''}`))
+  const accountText = accountLabel ? `@ ${accountLabel}` : ''
+  const showAccount =
+    segs.account && statusBarFields?.has('account') === true && !!accountText && fits(SEP + stringWidth(accountText))
   const showDuration = segs.duration && ok('duration') && !!sessionStartedAt && fits(SEP + MAX_DURATION_WIDTH)
 
   // Idle clock — time since the last final agent response. Hidden while busy
@@ -727,6 +733,12 @@ export function StatusRule({
             <Text color={t.color.muted}>{' │ '}</Text>
             <Text color={t.color.warn}>◉ focus</Text>
           </Box>
+        ) : null}
+        {showAccount ? (
+          <Text color={t.color.muted} wrap="truncate-end">
+            {' │ '}
+            {accountText}
+          </Text>
         ) : null}
         {showBar ? (
           <Text color={t.color.muted} wrap="truncate-end">
@@ -933,6 +945,7 @@ export function TranscriptScrollbar({ scrollRef, t }: TranscriptScrollbarProps) 
 }
 
 interface StatusRuleProps {
+  accountLabel?: string
   battery?: BatteryInfo | null
   // Focus view (/focus) badge — display-only reduced-output indicator.
   focusView?: boolean

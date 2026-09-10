@@ -544,16 +544,26 @@ describe('StatusRule perf read-outs (cache hit / latency / tps)', () => {
   it('honors the display.status_bar.fields visibility filter', () => {
     const element = StatusRule({
       ...baseProps,
+      accountLabel: 'work@example.com',
       cols: 160,
-      statusBarFields: new Set(['model', 'context_pct', 'cache_hit']),
+      statusBarFields: new Set(['account', 'model', 'context_pct', 'cache_hit']),
       usage: perfUsage
     })
 
     const rendered = textContent(element)
 
     expect(rendered).toContain('◎ 87%')
+    expect(rendered).toContain('@ work@example.com')
     expect(rendered).not.toContain('◷')
     expect(rendered).not.toContain('t/s')
+
+    const narrow = textContent(StatusRule({
+      ...baseProps,
+      accountLabel: 'work@example.com',
+      cols: 60,
+      statusBarFields: new Set(['account', 'model'])
+    }))
+    expect(narrow).not.toContain('@ work@example.com')
   })
 
   it('hides the session title badge when the fields filter omits title', () => {
