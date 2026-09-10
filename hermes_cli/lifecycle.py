@@ -24,9 +24,20 @@ def _plugin_hooks(hook_name: str, **kwargs: Any) -> List[Any]:
 
 
 def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
-    """Notify first-party observers, then invoke compatibility plugin hooks."""
+    """Notify first-party observers, then invoke compatibility plugin hooks.
+
+    A plugin may return ``{"action": "halt_turn", "response": "..."}`` from
+    any hook carrying an active ``turn_id``. The control registry records the
+    first valid directive; the agent loop consumes it at its next safe boundary.
+    """
     _observe(hook_name, **kwargs)
-    return _plugin_hooks(hook_name, **kwargs)
+    results = _plugin_hooks(hook_name, **kwargs)
+    turn_id = kwargs.get("turn_id")
+    if isinstance(turn_id, str) and turn_id:
+        from agent.plugin_turn_control import record_plugin_turn_halts
+
+        record_plugin_turn_halts(turn_id, results)
+    return results
 
 
 def has_hook(hook_name: str) -> bool:

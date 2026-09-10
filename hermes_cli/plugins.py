@@ -109,7 +109,8 @@ VALID_HOOKS: Set[str] = {
     # transform_llm_output: return a replacement string (first non-None wins) or None.
     "transform_llm_output", "pre_llm_call", "post_llm_call",
     # Streaming observers (agent.plugin_stream_hooks), off the token path; payloads are immutable
-    # normalized text/lifecycle and cannot transform the stream.
+    # normalized text/lifecycle. An exact halt_turn return may stop the active turn but cannot
+    # transform individual deltas.
     "on_stream_start", "on_stream_delta", "on_stream_end", "on_interim_message",
     # pre_verify: once per turn when the agent edited code and is about to verify/finish. Return
     # {"action": "continue", "message"} (or Claude-Code Stop {"decision": "block", "reason"}) to keep
@@ -1800,6 +1801,15 @@ def _get_pre_tool_call_directive_details(
             if isinstance(partial, dict) and partial:
                 modified_args = {**(modified_args if modified_args is not None else
                                     (args if isinstance(args, dict) else {})), **partial}
+            continue
+        if action == "halt_turn":
+            response = result.get("response")
+            if isinstance(response, str) and response.strip():
+                # Lifecycle dispatch already recorded the turn-level halt. Block
+                # this call too so it cannot execute before the next loop boundary.
+                return _PreToolCallDirective(
+                    action="block", message=response, modified_args=modified_args,
+                )
             continue
         if action not in ("block", "approve"):
             continue

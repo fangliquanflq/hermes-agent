@@ -65,7 +65,12 @@ def _worker(dispatcher: _ConsumerDispatcher) -> None:
             payload = dict(item)
             payload.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
             try:
-                dispatcher.callback(**payload)
+                result = dispatcher.callback(**payload)
+                turn_id = payload.get("turn_id")
+                if isinstance(turn_id, str) and turn_id:
+                    from agent.plugin_turn_control import record_plugin_turn_halt
+
+                    record_plugin_turn_halt(turn_id, result)
             except Exception as exc:
                 logger.warning(
                     "Hook '%s' callback %s raised: %s", dispatcher.hook_name, _callback_name(dispatcher.callback), exc
@@ -122,7 +127,12 @@ def _dispatchers_for(hook_name: str) -> list[_ConsumerDispatcher]:
 
 
 def enqueue_plugin_stream_hook(hook_name: str, **payload: Any) -> bool:
-    """Queue an observer hook for each consumer without running plugin code inline."""
+    """Queue a hook for each consumer without running plugin code inline.
+
+    Stream callbacks remain observers unless they explicitly return the exact
+    ``halt_turn`` directive. The worker records that directive for the agent to
+    consume at a safe stream boundary.
+    """
     queued = False
     item = dict(payload)
     for dispatcher in _dispatchers_for(hook_name):

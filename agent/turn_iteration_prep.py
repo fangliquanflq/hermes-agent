@@ -315,6 +315,8 @@ def begin_iteration(
             _turn_exit_reason=_turn_exit_reason,
         )
 
+    agent._poll_plugin_turn_halt()
+
     _redirect_text = agent._drain_pending_redirect()
     if _redirect_text:
         _apply_active_turn_redirect(agent, messages, _redirect_text)
@@ -328,8 +330,8 @@ def begin_iteration(
     agent._checkpoint_mgr.new_turn()
 
     if agent._interrupt_requested:
-        interrupted = True
-        _turn_exit_reason = "interrupted_by_user"
+        interrupted = getattr(agent, "_plugin_turn_halt_response", None) is None
+        _turn_exit_reason = "interrupted_by_user" if interrupted else "plugin_halt_turn"
         if not agent.quiet_mode:
             agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
         return _verdict("break")

@@ -1527,6 +1527,9 @@ def _run_conversation_turn(
         early_result = _run_api_retry_loop(agent, s)
         if early_result is not None:
             return early_result
+        if agent._poll_plugin_turn_halt():
+            s._turn_exit_reason = "plugin_halt_turn"
+            break
 
         _rs = _run_phase(apply_retry_restarts, agent, s)
         if _rs.action == "break":
@@ -1588,21 +1591,26 @@ def run_conversation(
     """
     from agent.turn_context import export_current_turn_boundary
 
-    result = _run_conversation_turn(
-        agent,
-        user_message,
-        system_message=system_message,
-        conversation_history=conversation_history,
-        task_id=task_id,
-        stream_callback=stream_callback,
-        persist_user_message=persist_user_message,
-        persist_user_timestamp=persist_user_timestamp,
-        persist_user_display_kind=persist_user_display_kind,
-        persist_user_display_metadata=persist_user_display_metadata,
-        persist_user_platform_id=persist_user_platform_id,
-        moa_config=moa_config,
-    )
-    return export_current_turn_boundary(agent, result, user_message)
+    try:
+        result = _run_conversation_turn(
+            agent,
+            user_message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+            task_id=task_id,
+            stream_callback=stream_callback,
+            persist_user_message=persist_user_message,
+            persist_user_timestamp=persist_user_timestamp,
+            persist_user_display_kind=persist_user_display_kind,
+            persist_user_display_metadata=persist_user_display_metadata,
+            persist_user_platform_id=persist_user_platform_id,
+            moa_config=moa_config,
+        )
+        return export_current_turn_boundary(agent, result, user_message)
+    finally:
+        from agent.plugin_turn_control import close_plugin_turn
+
+        close_plugin_turn(getattr(agent, "_current_turn_id", "") or "")
 
 
 __all__ = ["run_conversation"]

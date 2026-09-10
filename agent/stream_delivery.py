@@ -35,6 +35,21 @@ class StreamDeliveryMixin:
         results = [self._call_quietly(cb, text) for cb in (self.stream_delta_callback, self._stream_callback)]
         return any(results)
 
+    def _poll_plugin_turn_halt(self) -> bool:
+        """Adopt one plugin halt request on the agent/stream owner thread."""
+        if getattr(self, "_plugin_turn_halt_response", None) is not None:
+            return True
+        from agent.plugin_turn_control import take_plugin_turn_halt
+
+        directive = take_plugin_turn_halt(getattr(self, "_current_turn_id", "") or "")
+        if directive is None:
+            return False
+        self._plugin_turn_halt_response = directive.response
+        # Reuse transport cancellation; finalization turns this internal
+        # interrupt into a successful controlled completion.
+        self._interrupt_requested = True
+        return True
+
     def _enqueue_stream_hook(self, event: str, *, label: str | None = None, **fields: Any) -> None:
         """Best-effort plugin stream hook enqueue; never raises into the stream path."""
         try:
@@ -284,6 +299,8 @@ class StreamDeliveryMixin:
 
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
+        if self._poll_plugin_turn_halt():
+            return
         # A superseded stream must not interleave its tokens alongside the retry that replaced it.
         if self._stream_writer_superseded():
             # See #65991.
@@ -317,6 +334,8 @@ class StreamDeliveryMixin:
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered; superseded writers are fenced like content deltas."""
+        if self._poll_plugin_turn_halt():
+            return
         if self._stream_writer_superseded():
             # Single-writer guard (#65991): fence out a superseded stream's reasoning deltas the same way as
             # content deltas.
