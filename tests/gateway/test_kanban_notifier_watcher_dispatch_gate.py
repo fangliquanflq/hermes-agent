@@ -44,3 +44,18 @@ def test_notifier_watcher_polls_without_dispatch_ownership():
     assert past_gate, (
         "gateways without the dispatch lock must still poll owned subscriptions"
     )
+
+
+def test_notifier_watcher_exits_when_disabled_in_config():
+    """A profile with no notification ownership can disable the idle poll."""
+    runner = _make_runner(with_adapter=True)
+
+    with patch("hermes_cli.config.load_config", return_value={
+        "kanban": {"notify_in_gateway": False},
+    }), patch("hermes_cli.kanban_db.list_boards") as list_boards, patch(
+        "asyncio.sleep",
+    ) as sleep:
+        asyncio.run(runner._kanban_notifier_watcher())
+
+    list_boards.assert_not_called()
+    sleep.assert_not_called()

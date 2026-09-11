@@ -159,6 +159,7 @@ hermes kanban stats
 ```yaml
 # config.yaml
 kanban:
+  notify_in_gateway: true          # 默认
   dispatch_in_gateway: true        # 默认
   dispatch_interval_seconds: 60    # 默认
   review_dispatch: true            # 默认：使用内置 sdlc-review skill 自动启动 reviewer。
@@ -436,6 +437,7 @@ hermes dashboard        # 导航栏中出现 "Kanban" 标签页，位于 "Skills
 | `orchestrator_profile` | `""` | 拥有分解权的配置文件。空 = 回退到活动默认配置文件。 |
 | `default_assignee` | `""` | LLM 选择未知配置文件时子任务的落地位置。空 = 回退到活动默认配置文件。 |
 | `auto_subscribe_on_create` | `true` | 当 `kanban_create` 在持久 gateway/TUI 会话中运行时，终止事件会通过合成状态回合恢复原始 agent。设为 `false` 可让完成保持被动，或要求显式调用 `kanban_notify-subscribe`。此设置独立于 `auto_decompose`。 |
+| `notify_in_gateway` | `true` | 由此配置文件的 gateway 轮询并投递通知订阅。仅在配置文件永不拥有订阅时设为 `false`，以避免空闲的五秒轮询。 |
 
 以及两个辅助 LLM 槽：
 
