@@ -1,7 +1,8 @@
 """1Password Login items as a vault backend (``op`` CLI).
 
-Unlock: ``op signin --raw`` with the master password on stdin (desktop-app
-integration or account-level auth) mints an ``OP_SESSION_<account>`` token.
+Unlock: ``op signin --raw`` with the master password on stdin. Account-level
+auth mints an ``OP_SESSION_<account>`` token; desktop-app integration may
+authenticate successfully without one, and subsequent commands use the app.
 A configured service-account token skips the prompt entirely (headless).
 List: ``op item list --categories Login --format json`` → title, urls,
 username. Resolve: ``op item get <id> --fields label=password --reveal``.
@@ -78,14 +79,14 @@ class OnePasswordLoginBackend(LoginBackend):
             cmd += ["--account", account]
         proc = run_with_stdin_secret(cmd, env=self._env(None), secret=master_password, timeout=_TIMEOUT, label="op")
         token = (proc.stdout or "").strip()
-        if proc.returncode != 0 or not token:
-            raise RuntimeError(f"1Password unlock failed: {_scrub(proc.stderr or '')[:200] or 'no session token'}")
+        if proc.returncode != 0:
+            raise RuntimeError(f"1Password unlock failed: {_scrub(proc.stderr or '')[:200] or 'sign in failed'}")
         if not _unlock.store_session_token(self.name, token, generation):
             raise RuntimeError("1Password was locked while unlocking; try again")
 
     def _run(self, *args: str) -> str:
         token = None if self._service_token else _unlock.get_session_token(self.name)
-        if not self._service_token and not token:
+        if not self._service_token and token is None:
             raise UnlockRequired(self)
         proc = run_cli([str(self._op()), *args], env=self._env(token), timeout=_TIMEOUT, label="op",
                        timeout_message="op timed out", stdin=subprocess.DEVNULL)

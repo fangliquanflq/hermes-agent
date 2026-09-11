@@ -1,8 +1,10 @@
 """Per-process unlock state for external password managers.
 
-An unlock is a session token minted by the manager's CLI from the master
-password (``op signin --raw`` / ``bw unlock --raw``). The token lives in
-process memory only, keyed by backend, and expires after an idle TTL or an
+An unlock is authentication established by the manager's CLI from the master
+password (``op signin --raw`` / ``bw unlock --raw``). Usually that produces a
+session token; 1Password desktop-app integration instead authenticates later
+commands through the app, represented here by an empty token. The state lives
+in process memory only, keyed by backend, and expires after an idle TTL or an
 explicit lock. The master password itself is consumed by the CLI call and
 dropped; nothing is written to disk or env.
 
@@ -100,7 +102,7 @@ def _live(backend: str, *, touch: bool) -> Optional[str]:
 
 
 def get_session_token(backend: str) -> Optional[str]:
-    """Token for a real manager call; refreshes the idle timer."""
+    """Token for a real manager call, or ``""`` for app auth; refreshes the idle timer."""
     return _live(backend, touch=True)
 
 
