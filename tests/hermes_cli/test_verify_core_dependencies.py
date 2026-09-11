@@ -11,7 +11,7 @@ The verification step:
   2. Filters by environment markers so cross-platform exclusions don't
      false-positive (e.g. ``ptyprocess ; sys_platform != 'win32'`` on Windows).
   3. Probes ``importlib.metadata.version()`` in the venv interpreter.
-  4. Reinstalls with --reinstall, then per-package, if anything's missing.
+  4. Reinstalls with --reinstall, then per-package, if anything's missing or out of spec.
 """
 
 from __future__ import annotations
@@ -122,6 +122,31 @@ class TestVerifyCoreDependencies:
             _verify_core_dependencies_installed(["uv", "pip"], env={})
             assert not mock_resolve.called
             assert not mock_install.called
+
+    def test_repairs_installed_dependency_outside_declared_pin(
+        self, temp_pyproject, fake_venv_python
+    ):
+        """An unchanged manifest must still heal version drift in the existing venv."""
+        py, venv_root = fake_venv_python
+        env = {"VIRTUAL_ENV": str(venv_root)}
+        probes = iter([
+            MagicMock(returncode=0, stdout="pydantic\n", stderr=""),
+            MagicMock(returncode=0, stdout="", stderr=""),
+        ])
+
+        with patch(
+            "hermes_cli.main_install_repair._resolve_install_target_python", return_value=py
+        ), patch(
+            "hermes_cli.main_install_repair._venv_probe", side_effect=lambda *a, **k: next(probes)
+        ), patch(
+            "hermes_cli.main_install_repair._run_quarantined_install"
+        ) as repair:
+            from hermes_cli.main_install_repair import _verify_core_dependencies_installed
+
+            _verify_core_dependencies_installed(["uv", "pip"], env=env)
+
+        repair.assert_called_once()
+        assert repair.call_args.args[0][-4:] == ["install", "--reinstall", "-e", "."]
 
 
 

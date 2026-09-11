@@ -1051,25 +1051,35 @@ def _applicable_dependency_names(raw_deps: list[str]) -> list[str]:
     return applicable
 
 
-_MISSING_DEPS_SCRIPT = (
+_UNSATISFIED_DEPS_SCRIPT = (
     "import importlib.metadata as md, sys\n"
-    "missing=[]\n"
-    "for name in sys.argv[1:]:\n"
-    "    try: md.version(name)\n"
-    "    except md.PackageNotFoundError: missing.append(name)\n"
-    "print('\\n'.join(missing))\n")
+    "try:\n"
+    "    from packaging.requirements import Requirement\n"
+    "    from packaging.version import InvalidVersion, Version\n"
+    "except ModuleNotFoundError:\n"
+    "    print('\\n'.join(sys.argv[1::2])); raise SystemExit\n"
+    "unsatisfied=[]\n"
+    "args=iter(sys.argv[1:])\n"
+    "for name, spec in zip(args, args):\n"
+    "    req=Requirement(spec)\n"
+    "    try: installed=Version(md.version(name))\n"
+    "    except (md.PackageNotFoundError, InvalidVersion):\n"
+    "        unsatisfied.append(name); continue\n"
+    "    if installed not in req.specifier: unsatisfied.append(name)\n"
+    "print('\\n'.join(unsatisfied))\n")
 
 
 def _verify_core_dependencies_installed(
     install_cmd_prefix: list[str], *, env: dict[str, str] | None = None, group: str = "all"
 ) -> None:
-    """Check that every base dep from pyproject.toml is installed in the target venv; if not, retry.
+    """Check that every base dep satisfies pyproject.toml in the target venv; if not, retry.
 
     Reads ``pyproject.toml`` directly (not the venv's stale metadata), drops deps whose ``;``
     markers don't apply here, and probes ``importlib.metadata.version()`` in the venv
-    interpreter. Missing deps trigger a base-group ``--reinstall``, then a per-package force
-    install. The final state is a warning, not a hard failure, so one broken-on-PyPI dep can't
-    block an otherwise-successful update — but the partial install is visible where it happened.
+    interpreter. Missing or out-of-spec deps trigger a base-group ``--reinstall``, then a
+    per-package force install. The final state is a warning, not a hard failure, so one
+    broken-on-PyPI dep can't block an otherwise-successful update — but the partial install is
+    visible where it happened.
     """
     project = _pyproject_project("dep verification: failed to read pyproject.toml: %s")
     if project is None:
@@ -1078,28 +1088,34 @@ def _verify_core_dependencies_installed(
     applicable = _applicable_dependency_names(raw_deps)
     if not applicable:
         return
+    name_to_spec = dict(_naive_requirement(spec) for spec in raw_deps)
+    probe_args = [
+        part for name in applicable for part in (name, name_to_spec.get(name, name))
+    ]
     # Probe inside the venv Python — sys.executable may be the outer Python that drove
     # ``hermes update``; the install prefix/env encode which environment we targeted.
     venv_python = _resolve_install_target_python(install_cmd_prefix, env)
     if venv_python is None:
         return
 
-    def _missing_deps() -> list[str]:
+    def _unsatisfied_deps() -> list[str]:
         try:
-            result = _venv_probe(venv_python, _MISSING_DEPS_SCRIPT, *applicable, env=env)
+            result = _venv_probe(
+                venv_python, _UNSATISFIED_DEPS_SCRIPT, *probe_args, env=env
+            )
         except Exception as e:
             logger.debug("dep verification: subprocess failed: %s", e)
             return []
         return _nonblank_lines(result.stdout)
 
-    missing = _missing_deps()
-    if not missing:
+    unsatisfied = _unsatisfied_deps()
+    if not unsatisfied:
         return
     print(
-        f"  ⚠ Verification: {len(missing)} declared dep(s) missing after install: "
-        f"{', '.join(missing[:8])}{'...' if len(missing) > 8 else ''}")
+        f"  ⚠ Verification: {len(unsatisfied)} declared dep(s) missing or out of spec after install: "
+        f"{', '.join(unsatisfied[:8])}{'...' if len(unsatisfied) > 8 else ''}")
     print("  → Reinstalling base group with --reinstall to repair...")
-    # Base group only, not ``[{group}]``: the missing dep is a *base* dep and the all-extras
+    # Base group only, not ``[{group}]``: the unsatisfied dep is a *base* dep and the all-extras
     # install costs minutes. Quarantine first: ``--reinstall -e .`` rewrites the shims.
     scripts_dir = _venv_scripts_dir() if _is_windows() else None
     if not _run_repair_step(
@@ -1108,26 +1124,25 @@ def _verify_core_dependencies_installed(
         log_msg="dep verification: repair install failed: %s",
         fail_msg="  ⚠ Repair install failed; check `hermes update` output above."):
         return
-    still_missing = _missing_deps()
-    if not still_missing:
-        print("  ✓ All declared core dependencies now installed")
+    still_unsatisfied = _unsatisfied_deps()
+    if not still_unsatisfied:
+        print("  ✓ All declared core dependencies now satisfy their requirements")
         return
-    # Last-ditch: install each remaining missing dep with its pin directly — uv's
+    # Last-ditch: install each remaining unsatisfied dep with its pin directly — uv's
     # resolver can think the env is satisfied while on-disk metadata disagrees.
-    name_to_spec = dict(_naive_requirement(spec) for spec in raw_deps)
-    specs = [name_to_spec.get(n, n) for n in still_missing]
-    print(f"  → Force-installing remaining missing dep(s): {', '.join(specs)}")
+    specs = [name_to_spec.get(n, n) for n in still_unsatisfied]
+    print(f"  → Force-installing remaining unsatisfied dep(s): {', '.join(specs)}")
     if not _run_repair_step(
         _run_install_with_heartbeat, install_cmd_prefix + ["install", "--reinstall", *specs],
         env=env,
         log_msg="dep verification: per-package repair failed: %s",
         fail_msg=(
-            f"  ⚠ Could not install: {', '.join(still_missing)}. "
+            f"  ⚠ Could not satisfy: {', '.join(still_unsatisfied)}. "
             "Run `hermes update --force` after closing other hermes processes.")):
         return
     _report_still_missing(
-        _missing_deps(), "Run `hermes update --force` after closing other hermes processes.",
-        ok="  ✓ All declared core dependencies now installed")
+        _unsatisfied_deps(), "Run `hermes update --force` after closing other hermes processes.",
+        ok="  ✓ All declared core dependencies now satisfy their requirements")
 
 
 def _resolve_install_target_python(
