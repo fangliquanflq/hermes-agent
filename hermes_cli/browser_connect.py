@@ -133,6 +133,13 @@ _WINDOWS_CHANNEL_PROGIDS = (
     "bravebetahtml", "bravenightlyhtml",
     "braveobhtml", "braveodhtml", "braveoshtm")
 
+_WINDOWS_CHANNEL_INSTALL_MARKERS = (
+    "\\google\\chrome beta\\", "\\google\\chrome dev\\", "\\google\\chrome sxs\\",
+    "\\microsoft\\edge beta\\", "\\microsoft\\edge dev\\", "\\microsoft\\edge sxs\\",
+    "\\bravesoftware\\brave-browser-beta\\", "\\bravesoftware\\brave-browser-dev\\",
+    "\\bravesoftware\\brave-browser-nightly\\", "\\bravesoftware\\brave-origin-beta\\",
+    "\\bravesoftware\\brave-origin-dev\\", "\\bravesoftware\\brave-origin-nightly\\")
+
 # Linux xdg default-web-browser .desktop name fragments → key (SUBSTRING match),
 # including Flatpak application ids (``com.google.Chrome.desktop``).
 _LINUX_DESKTOP_MAP = (
@@ -232,18 +239,61 @@ def _classify_default(value: str, channels, table, match) -> str | None:
     return next((browser for frag, browser in table if match(value, frag)), None)
 
 
-def _detect_default_windows() -> str | None:
+def _query_effective_windows_https_executable() -> str | None:
+    """Ask the Windows shell which executable currently handles ``https``."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        query = ctypes.WinDLL("shlwapi").AssocQueryStringW
+        query.argtypes = (wintypes.DWORD, ctypes.c_int, wintypes.LPCWSTR,
+                          wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+        query.restype = ctypes.c_long
+        size = wintypes.DWORD()
+        query(0, 2, "https", None, None, ctypes.byref(size))  # ASSOCSTR_EXECUTABLE = 2
+        if not size.value:
+            return None
+        executable = ctypes.create_unicode_buffer(size.value)
+        if query(0, 2, "https", None, executable, ctypes.byref(size)) != 0:
+            return None
+        return executable.value or None
+    except Exception:
+        return None
+
+
+def _classify_windows_executable(executable: str) -> str | None:
+    normalized = ntpath.normcase(ntpath.normpath(executable)).replace("/", "\\")
+    if any(marker in normalized for marker in _WINDOWS_CHANNEL_INSTALL_MARKERS):
+        return UNSUPPORTED_CHANNEL
+    for browser in _BROWSERS:
+        for parts in browser.win_install:
+            suffix = ntpath.normcase(ntpath.join(*parts))
+            if normalized == suffix or normalized.endswith("\\" + suffix):
+                return browser.key
+    return None
+
+
+def _read_windows_user_choice() -> str | None:
     try:
         import winreg  # type: ignore
 
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice")
-        prog_id, _ = winreg.QueryValueEx(key, "ProgId")
-        winreg.CloseKey(key)
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice") as key:
+            prog_id, _ = winreg.QueryValueEx(key, "ProgId")
     except Exception:  # non-Windows host (no winreg) or unreadable key
         return None
-    return _classify_default(str(prog_id or "").lower(), _WINDOWS_CHANNEL_PROGIDS,
+    return str(prog_id or "") or None
+
+
+def _detect_default_windows() -> str | None:
+    executable = _query_effective_windows_https_executable()
+    if executable is not None:
+        return _classify_windows_executable(executable)
+    prog_id = _read_windows_user_choice()
+    if prog_id is None:
+        return None
+    return _classify_default(prog_id.lower(), _WINDOWS_CHANNEL_PROGIDS,
                              _WINDOWS_PROGID_MAP, str.startswith)
 
 

@@ -63,6 +63,26 @@ class TestRealProfileResolvers:
         assert m["bravehtml"] == "brave"
         assert m["braveohtml"] == "brave-origin"
 
+    def test_detect_default_windows_prefers_effective_shell_handler(self):
+        import hermes_cli.browser_connect as bc
+        chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        with patch.object(bc, "_query_effective_windows_https_executable", return_value=chrome), \
+             patch.object(bc, "_read_windows_user_choice", return_value="VivaldiHTM") as legacy:
+            assert bc._detect_default_windows() == "chrome"
+        legacy.assert_not_called()
+
+    @pytest.mark.parametrize("channel", [
+        r"C:\Program Files\Google\Chrome Beta\Application\chrome.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge Dev\Application\msedge.exe",
+        r"C:\Users\T\AppData\Local\BraveSoftware\Brave-Browser-Nightly\Application\brave.exe",
+    ])
+    def test_detect_default_windows_channels_fail_closed(self, channel):
+        import hermes_cli.browser_connect as bc
+        with patch.object(bc, "_query_effective_windows_https_executable", return_value=channel), \
+             patch.object(bc, "_read_windows_user_choice", return_value="ChromeHTML") as legacy:
+            assert bc._detect_default_windows() == bc.UNSUPPORTED_CHANNEL
+        legacy.assert_not_called()
+
     def test_brave_origin_data_dirs(self):
         import hermes_cli.browser_connect as bc
         with patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Users\T\AppData\Local"}, clear=False):
