@@ -117,6 +117,9 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 # past them and they can't wedge a later completed/blocked event behind an unclaimed row.
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0  # /loop and /heartbeat share one idle-poll cadence
+_BOT_LIVE_POLL_SECONDS = 0.5
+_bot_live_poll_lock = threading.Lock()
+_bot_live_next_poll: dict[str, float] = {}
 
 
 def _notif_release_turn(session: dict) -> None:
@@ -489,7 +492,7 @@ def _notif_handle_ready(sid, session, events, emitted, registry, fmt, deferred, 
     _notif_dispatch_completions(sid, session, completions, registry, deferred)
 
 
-def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
+def _poll_bot_live_delivery_once(sid: str, session: dict, *, owner: dict | None = None) -> bool:
     """Run one durable envelope only after local FIFO/continuations yield the idle boundary."""
     from tools.bot_live_delivery import claim_pending_delivery, complete_delivery, find_canonical_live_owner
 
@@ -502,7 +505,7 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
         lease = session.get("active_session_lease")
         if lease is None or getattr(lease, "released", False):
             return False
-        owner = find_canonical_live_owner(home)
+        owner = owner or find_canonical_live_owner(home)
         if (not owner or owner.get("lease_id") != lease.lease_id
                 or owner.get("live_session_id") != sid
                 or owner.get("session_id") != session.get("session_key")):
@@ -541,6 +544,28 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
     return started
 
 
+def _poll_bot_live_delivery_due(session: dict) -> bool:
+    """Resolve and poll one canonical owner per profile, not once per open session."""
+    from tools.bot_live_delivery import find_canonical_live_owner
+
+    home = _session_home(session)
+    home_key = str(home.resolve())
+    now = time.monotonic()
+    with _bot_live_poll_lock:
+        if now < _bot_live_next_poll.get(home_key, 0.0):
+            return False
+        _bot_live_next_poll[home_key] = now + _BOT_LIVE_POLL_SECONDS
+    owner = find_canonical_live_owner(home)
+    if not owner:
+        return False
+    owner_sid = str(owner.get("live_session_id") or "")
+    with _sessions_lock:
+        owner_session = _sessions.get(owner_sid)
+    if owner_session is None:
+        return False
+    return _poll_bot_live_delivery_once(owner_sid, owner_session, owner=owner)
+
+
 def _notification_poller_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
     """Daemon thread (started by _init_session()) that drains the process-global completion_queue for this session
     (ownership routing: _notif_handle_event) and polls ``kanban_notify_subs`` every ``_KANBAN_POLL_SECONDS`` — the
@@ -560,7 +585,7 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
     while not stop_event.is_set() and not session.get("_finalized"):
         now = time.monotonic()
         try:
-            _poll_bot_live_delivery_once(sid, session)
+            _poll_bot_live_delivery_due(session)
         except Exception:
             logger.warning("Bot live-owner delivery poll failed", exc_info=True)
         # /loop and /heartbeat wakeup drivers: fire a due tick for THIS session while idle (same claim-under-lock

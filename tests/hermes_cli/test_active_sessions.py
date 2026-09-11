@@ -13,6 +13,18 @@ from hermes_cli import active_sessions
 
 
 
+def test_pid_liveness_caches_current_process_identity(monkeypatch):
+    pid = os.getpid()
+    starts = []
+    monkeypatch.setattr(active_sessions, "_self_process_identity", (0, None))
+    monkeypatch.setattr(active_sessions, "_process_start_time", lambda value: starts.append(value) or 123.0)
+
+    assert active_sessions._pid_liveness(pid, 123.0, lenient=True) is True
+    assert active_sessions._pid_liveness(pid, 123.0, lenient=True) is True
+    assert active_sessions._pid_liveness(pid, 1.0, lenient=True) is False
+    assert starts == [pid]
+
+
 def _backdate_leases(*homes, age_seconds=600.0):
     """Age every lease in the given registries past the self-orphan grace."""
     for home in homes:

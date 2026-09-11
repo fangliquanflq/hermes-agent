@@ -22,6 +22,7 @@ from typing import Any, Iterator, Optional
 from hermes_constants import get_default_hermes_root, get_hermes_home
 
 logger = logging.getLogger(__name__)
+_self_process_identity: tuple[int, Optional[float]] = (0, None)
 
 
 class ActiveSessionRegistryError(RuntimeError):
@@ -310,6 +311,16 @@ def _process_start_time(pid: int) -> Optional[float]:
         return None
 
 
+def _self_process_start_time(pid: int) -> Optional[float]:
+    """Cache this process's stable start time while remaining safe after fork."""
+    global _self_process_identity
+    cached_pid, cached_start = _self_process_identity
+    if cached_pid != pid:
+        cached_start = _process_start_time(pid)
+        _self_process_identity = (pid, cached_start)
+    return cached_start
+
+
 def _optional_float(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
@@ -329,6 +340,14 @@ def _pid_liveness(pid: Any, process_start_time: Any = None, *, lenient: bool = F
         pid_int = 0
     if pid_int <= 0:
         return unknown_dead
+    expected_start = _optional_float(process_start_time)
+    if pid_int == os.getpid():
+        if expected_start is None:
+            return True
+        current_start = _self_process_start_time(pid_int)
+        if current_start is None:
+            return True if lenient else None
+        return abs(current_start - expected_start) < 0.001
     try:
         from gateway.status import _pid_exists
         exists = bool(_pid_exists(pid_int))
@@ -336,7 +355,6 @@ def _pid_liveness(pid: Any, process_start_time: Any = None, *, lenient: bool = F
         return unknown_dead
     if not exists:
         return False
-    expected_start = _optional_float(process_start_time)
     if expected_start is None:
         return True
     current_start = _process_start_time(pid_int)

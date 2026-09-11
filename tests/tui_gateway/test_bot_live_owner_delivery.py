@@ -91,3 +91,28 @@ def test_local_work_blocks_mailbox_claim_without_consuming_envelope(monkeypatch,
     assert submitted == [("imported", author)] and not pending
     assert receipts[0][0][1] == "receipt"
     assert receipts[0][1]["reply"] == "reply"
+
+
+def test_profile_poller_resolves_owner_once_and_routes_exact_session(monkeypatch, tmp_path):
+    import tools.bot_live_delivery as mailbox
+
+    owner = {"lease_id": "lease", "live_session_id": "owner", "session_id": "chat"}
+    resolutions = []
+    monkeypatch.setattr(mailbox, "find_canonical_live_owner", lambda home: resolutions.append(home) or owner)
+    routed = []
+    sessions = {"owner": {"profile_home": str(tmp_path)}}
+    poll = rebind(session_notifications._poll_bot_live_delivery_due, {
+        "time": SimpleNamespace(monotonic=lambda: 10.0),
+        "_session_home": lambda session: tmp_path,
+        "_bot_live_poll_lock": threading.Lock(),
+        "_bot_live_next_poll": {},
+        "_BOT_LIVE_POLL_SECONDS": 0.5,
+        "_sessions_lock": threading.Lock(),
+        "_sessions": sessions,
+        "_poll_bot_live_delivery_once": lambda sid, session, owner=None: routed.append((sid, session, owner)) or True,
+    })
+
+    assert poll({"profile_home": str(tmp_path)}) is True
+    assert poll({"profile_home": str(tmp_path)}) is False
+    assert len(resolutions) == 1
+    assert routed == [("owner", sessions["owner"], owner)]
