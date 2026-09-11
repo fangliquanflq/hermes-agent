@@ -664,9 +664,8 @@ class TestMatrixMediaLiveAdapterReuse:
             ("send_image_file", "!room:example.com", str(img_path)),
         ]
 
-    def test_live_adapter_not_available_falls_back_to_ephemeral(self, tmp_path):
-        """When _gateway_runner_ref returns None, the ephemeral adapter
-        path (connect + disconnect) is used as before."""
+    def test_live_adapter_reuse_can_be_disabled_for_fallback(self, tmp_path):
+        """A caller already falling back from the live lane gets an adapter owned by its loop."""
         doc_path = tmp_path / "doc.pdf"
         doc_path.write_bytes(b"%PDF-1.4")
 
@@ -693,8 +692,10 @@ class TestMatrixMediaLiveAdapterReuse:
 
         fake_module = SimpleNamespace(MatrixAdapter=EphemeralAdapter)
 
+        live_adapter = SimpleNamespace(send=AsyncMock())
         with patch(
-            "gateway.run._gateway_runner_ref", return_value=None
+            "gateway.run._gateway_runner_ref",
+            return_value=SimpleNamespace(adapters={Platform.MATRIX: live_adapter}),
         ), patch.dict(sys.modules, {"plugins.platforms.matrix.adapter": fake_module}):
             result = asyncio.run(
                 _send_matrix_via_adapter(
@@ -702,6 +703,7 @@ class TestMatrixMediaLiveAdapterReuse:
                     "!room:example.com",
                     "report attached",
                     media_files=[(str(doc_path), False)],
+                    reuse_live_adapter=False,
                 )
             )
 
@@ -712,6 +714,7 @@ class TestMatrixMediaLiveAdapterReuse:
             ("send_document", "!room:example.com", str(doc_path)),
             ("disconnect",),
         ]
+        live_adapter.send.assert_not_awaited()
 
 # ---------------------------------------------------------------------------
 # HTML auto-detection in Telegram send

@@ -497,7 +497,9 @@ async def _send_signal(extra, chat_id, message, media_files=None):
 
 
 # "ephemeral connect (may re-init E2EE per send, see #46310)",
-async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, thread_id=None):
+async def _send_matrix_via_adapter(
+    pconfig, chat_id, message, media_files=None, thread_id=None, *, reuse_live_adapter=True,
+):
     """Matrix adapter send (native media preserved). Prefer the live gateway adapter's persistent
     olm/megolm session: ephemeral per-send connects re-init E2EE and claim one-time keys, which
     under bursts exhausts recipient OTKs and silently drops messages — ephemeral is cron-only.
@@ -508,10 +510,12 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
     """
     media_files = media_files or []
     metadata = {"thread_id": thread_id} if thread_id else None
-    from gateway.config import Platform
-    _, live_adapter = _live_adapter(Platform.MATRIX, lookup_failed_warning=(
-        "Matrix: live gateway adapter lookup failed; falling back to an "
-        "ephemeral connect (may re-init E2EE per send)"))
+    live_adapter = None
+    if reuse_live_adapter:
+        from gateway.config import Platform
+        _, live_adapter = _live_adapter(Platform.MATRIX, lookup_failed_warning=(
+            "Matrix: live gateway adapter lookup failed; falling back to an "
+            "ephemeral connect (may re-init E2EE per send)"))
     if live_adapter is not None:
         # Owned by the gateway — must NOT be disconnected (return before the ephemeral ``finally``).
         return await _matrix_send_core(live_adapter, chat_id, message, media_files, metadata)

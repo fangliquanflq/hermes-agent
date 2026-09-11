@@ -1452,7 +1452,7 @@ def _standalone_send(
     def _send():
         return _send_to_platform(
             t.platform, t.pconfig, t.chat_id, content, thread_id=t.thread_id,
-            media_files=media_files)
+            media_files=media_files, reuse_live_adapter=False)
 
     def _warned(msg: str) -> tuple[None, str]:
         logger.warning("Job '%s': %s", job["id"], msg)

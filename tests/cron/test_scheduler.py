@@ -2141,6 +2141,7 @@ class TestDeliverResultLiveAdapterUnconfirmed:
         result, standalone_send = self._run(None)
         assert result is None, f"standalone should have delivered, got: {result!r}"
         standalone_send.assert_awaited_once()
+        assert standalone_send.await_args.kwargs["reuse_live_adapter"] is False
 
 
 class TestDeliverOriginUnresolvableIsLocal:

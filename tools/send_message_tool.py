@@ -564,8 +564,6 @@ def _via_adapter_route(p, pc, cid, chunk, media, tid, fd):
 # running gateway. Slack text: live adapter (multi-workspace, ignored_channels gates) else the
 # plugin's standalone sender. Names resolve at call time so tests can monkeypatch ``_send_signal``.
 _CHUNKED_ROUTES = {
-    "matrix": (False, [], lambda p, pc, cid, chunk, media, tid, fd: _send_matrix_via_adapter(
-        pc, cid, chunk, media_files=media, thread_id=tid)),
     "signal": (True, [], lambda p, pc, cid, chunk, media, tid, fd: _send_signal(
         pc.extra, cid, chunk, media_files=media)),
     "yuanbao": (True, None, lambda p, pc, cid, chunk, media, tid, fd: _send_yuanbao(cid, chunk, media_files=media)),
@@ -585,7 +583,10 @@ _TEXT_SENDERS = {
 _MEDIA_PLATFORMS_NOTE = "telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and slack"
 
 
-async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False, args=None):
+async def _send_to_platform(
+    platform, pconfig, chat_id, message, thread_id=None, media_files=None,
+    force_document=False, args=None, *, reuse_live_adapter=True,
+):
     """Route to the platform sender, chunking long text with the adapters' splitter. Order matters:
     Weixin first (its native helper must not be blocked by unrelated optional imports such as
     lark-oapi), Telegram (chunks itself), plugin standalone media, native chunked, generic text."""
@@ -602,6 +603,10 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     from gateway.platforms.base import BasePlatformAdapter
     max_len = _platform_max_length(platform)
     chunks = BasePlatformAdapter.truncate_message(message, max_len) if max_len else [message]
+    if platform_name == "matrix":
+        return await _send_chunks(chunks, lambda chunk, is_last: _send_matrix_via_adapter(
+            pconfig, chat_id, chunk, media_files=media_files if is_last else [],
+            thread_id=thread_id, reuse_live_adapter=reuse_live_adapter))
     if platform_name == "discord" or (media_files and platform_name in _PLUGIN_STANDALONE_MEDIA):
         return await _send_plugin_standalone(platform_name, pconfig, chat_id, message, chunks, media_files,
                                              thread_id=thread_id, max_len=max_len, force_document=force_document)
