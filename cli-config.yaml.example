@@ -344,6 +344,8 @@ model:
 # back to the original implementer, or escalate a genuine external blocker.
 # Disable this only when every review is performed manually from the dashboard.
 kanban:
+  # Disable on profiles that never own notification subscriptions to stop the idle five-second poll.
+  notify_in_gateway: true
   review_dispatch: true
 
 # =============================================================================
