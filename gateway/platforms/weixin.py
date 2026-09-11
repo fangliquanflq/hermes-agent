@@ -476,6 +476,9 @@ def _looks_like_chatty_line_for_weixin(line: str) -> bool:
         and not _TABLE_RULE_RE.match(stripped) and not re.match(r"^\*\*[^*]+\*\*$", stripped) and not re.match(r"^\d+\.\s", stripped))
 
 
+_LABEL_VALUE_RE = re.compile(r"^\S[^:：]{0,23}[:：]\s+\S")
+
+
 def _should_split_short_chat_block_for_weixin(block: str) -> bool:
     """Split only chat-like multiline blocks (2-6 chatty lines, first line not a heading) into separate bubbles."""
     lines = [line for line in block.splitlines() if line.strip()]
@@ -483,6 +486,8 @@ def _should_split_short_chat_block_for_weixin(block: str) -> bool:
         return False
     first = lines[0].strip()
     if _HEADER_RE.match(first) or (len(first) <= 24 and first.endswith((":", "："))):
+        return False
+    if sum(bool(_LABEL_VALUE_RE.match(line.strip())) for line in lines) * 2 > len(lines):
         return False
     return all(_looks_like_chatty_line_for_weixin(line) for line in lines)
 

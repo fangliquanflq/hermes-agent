@@ -76,6 +76,30 @@ class TestWeixinFormatting:
 class TestWeixinChunking:
 
 
+    def test_split_text_keeps_label_predominant_model_confirmation_together(self):
+        adapter = _make_adapter()
+        content = (
+            "Model switched to mimo-v2.5-pro\n"
+            "Provider: Xiaomi MiMo\n"
+            "Context: 1,048,576 tokens\n"
+            "Max output: 131,072 tokens\n"
+            "Capabilities: reasoning, tools, open weights\n"
+            "(session only — add --global to persist)"
+        )
+
+        assert adapter._split_text(content) == [content]
+
+
+    def test_split_text_keeps_chat_split_with_one_incidental_label(self):
+        adapter = _make_adapter()
+
+        assert adapter._split_text("hey are you there\nmeeting moved: 3pm\ncall me when free") == [
+            "hey are you there",
+            "meeting moved: 3pm",
+            "call me when free",
+        ]
+
+
     def test_split_text_keeps_four_line_structured_blocks_together(self):
         adapter = _make_adapter()
 
