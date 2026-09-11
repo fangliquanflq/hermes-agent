@@ -2189,8 +2189,11 @@ def switch_model(
         )
     except Exception as _reasoning_err:
         logger.debug("switch_model: could not re-resolve reasoning_config: %s", _reasoning_err)
-    # Invalidate the cached system prompt so it rebuilds next turn.
-    agent._cached_system_prompt = None
+    # Preserve the session-frozen prompt across the switch. Rebuilding here can drop SOUL.md or
+    # other session identity when a later file read fails, and breaks the byte-stable prompt
+    # contract. Only the renderer-owned runtime identity lines are model-specific.
+    from agent.chat_completion_helpers import rewrite_prompt_model_identity
+    rewrite_prompt_model_identity(agent, agent.model, agent.provider)
     # Publish the destination capability map only after every runtime setup above has succeeded.
     # Failed switches must leave the old map intact.
     agent.runtime_capabilities = destination_capabilities
@@ -2205,6 +2208,15 @@ def switch_model(
         old_model, old_provider, new_model, new_provider,
     )
     _persist_switch_billing_route(agent)
+    if (
+        getattr(agent, "_cached_system_prompt", None)
+        and getattr(agent, "_session_db", None)
+        and getattr(agent, "session_id", None)
+    ):
+        try:
+            agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
+        except Exception:
+            logger.warning("Failed to persist system prompt identity after model switch", exc_info=True)
 
 
 def _pre_tool_block_message(agent, function_name, function_args, effective_task_id, tool_call_id, middleware_trace):

@@ -133,6 +133,37 @@ def test_switch_model_without_config_context_length():
         assert call_kwargs.get("config_context_length") is None
 
 
+def test_switch_model_preserves_session_prompt_and_updates_runtime_identity():
+    """A model switch must not rebuild away session-frozen identity such as SOUL.md."""
+    agent = _make_agent_with_compressor(config_context_length=None)
+    agent._cached_system_prompt = (
+        "請一律使用繁體中文。\n\nModel: primary-model\nProvider: openrouter"
+    )
+    agent._cached_system_prompt_static = (
+        "Stable guidance\n\nModel: primary-model\nProvider: openrouter"
+    )
+    agent.session_id = "session-1"
+    agent._session_db = MagicMock()
+
+    with patch("agent.model_metadata.get_model_context_length", return_value=128_000):
+        agent.switch_model(
+            "claude-sonnet-4-6",
+            "anthropic",
+            api_key="test-key",
+            base_url="https://api.anthropic.com",
+            api_mode="anthropic_messages",
+        )
+
+    expected = (
+        "請一律使用繁體中文。\n\nModel: claude-sonnet-4-6\nProvider: anthropic"
+    )
+    assert agent._cached_system_prompt == expected
+    assert agent._cached_system_prompt_static == (
+        "Stable guidance\n\nModel: claude-sonnet-4-6\nProvider: anthropic"
+    )
+    agent._session_db.update_system_prompt.assert_called_once_with("session-1", expected)
+
+
 def test_switch_model_omitted_base_url_preserves_direct_openai_capability():
     """A same-provider switch resolves capabilities from the retained URL."""
     agent = _make_agent_with_compressor(config_context_length=None)

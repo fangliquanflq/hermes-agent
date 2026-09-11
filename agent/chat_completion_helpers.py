@@ -1578,22 +1578,24 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
 
 
 def rewrite_prompt_model_identity(agent, model: str, provider: str) -> None:
-    """Rewrite the cached prompt's ``Model:``/``Provider:`` lines after a provider switch.
+    """Rewrite cached prompt identity after a provider switch.
 
-    Not persisted: the stored row keeps the primary's labels so a restored primary replays a
-    byte-identical prompt (prefix cache intact). Only the LAST occurrence of each line is touched —
-    earlier matches may be user content (memory snapshots, context files)."""
-    sp = getattr(agent, "_cached_system_prompt", None)
-    if not isinstance(sp, str) or not sp:
-        return
-    for label, value in (("Model", model), ("Provider", provider)):
-        if not value:
+    This helper does not persist the rewrite: temporary fallback callers keep the stored primary
+    labels so restoration replays a byte-identical prompt. Only the LAST occurrence of each line
+    is touched — earlier matches may be user content (memory snapshots, context files). Keep the
+    separately cached static prefix aligned so native cache layouts do not send the old identity."""
+    for attr in ("_cached_system_prompt", "_cached_system_prompt_static"):
+        prompt = getattr(agent, attr, None)
+        if not isinstance(prompt, str) or not prompt:
             continue
-        matches = list(re.finditer(rf"(?m)^{label}: .*$", sp))
-        if matches:
-            last = matches[-1]
-            sp = f"{sp[:last.start()]}{label}: {value}{sp[last.end():]}"
-    agent._cached_system_prompt = sp
+        for label, value in (("Model", model), ("Provider", provider)):
+            if not value:
+                continue
+            matches = list(re.finditer(rf"(?m)^{label}: .*$", prompt))
+            if matches:
+                last = matches[-1]
+                prompt = f"{prompt[:last.start()]}{label}: {value}{prompt[last.end():]}"
+        setattr(agent, attr, prompt)
 
 
 def _fallback_entry_key(fb: dict) -> tuple[str, str, str]:
