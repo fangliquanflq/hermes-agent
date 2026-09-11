@@ -144,16 +144,16 @@ def _git_stdout_lines(repo_root: Path, args: List[str]) -> List[str]:
 
 
 def prune_stale_shallow_grafts(repo_root: Path) -> int:
-    """Drop ``.git/shallow`` graft lines no live ref still points at (#105951).
+    """Drop ``.git/shallow`` graft lines no ref or reflog still needs (#105951).
 
     Every ``git fetch --depth 1`` appends the fetched tip to ``.git/shallow`` as a new
     graft and never removes the previous one, so a long-lived shallow installer checkout
     accumulates one graft per update check (57 observed in the wild). The stale grafts
     break ``merge-base`` and push ``hermes update`` into the orphan-divergence reset path
-    on every run. Keep only the boundaries that still protect referenced tips (HEAD,
-    FETCH_HEAD, and every ref tip): the dropped commits are already unreachable and their
-    objects are left for ``git gc``. Returns the number of graft lines removed; never
-    raises, and restores the original file if the trimmed set breaks history walking.
+    on every run. Keep boundaries that still protect referenced tips or reflog entries:
+    dropping a reflog-reachable boundary leaves its commit with an unfetched parent, which
+    breaks maintenance walks. Returns the number of graft lines removed; never raises, and
+    restores the original file if the trimmed set breaks history walking.
     """
     try:
         shallow_rel = _git_stdout_lines(repo_root, ["rev-parse", "--git-path", "shallow"])
@@ -171,6 +171,7 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
             *(_git_stdout_lines(repo_root, ["rev-parse", "HEAD"]) or []),
             *(_git_stdout_lines(repo_root, ["rev-parse", "--verify", "--quiet", "FETCH_HEAD"]) or []),
             *_git_stdout_lines(repo_root, ["for-each-ref", "--format=%(objectname)"]),
+            *_git_stdout_lines(repo_root, ["reflog", "show", "--all", "--format=%H"]),
         }
         if len(keep) == len(lines):
             return 0
@@ -178,10 +179,9 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
         tmp_path = shallow_path.with_name(shallow_path.name + ".hermes-prune")
         tmp_path.write_text("\n".join(sorted(keep)) + "\n", encoding="utf-8")
         os.replace(tmp_path, shallow_path)
-        # Fail-safe: if any reachable walk now crosses a boundary we wrongly removed,
-        # put the grafts back — a growing file beats a broken repo.
+        # Fail-safe: use the reflog-inclusive walk performed by maintenance and fsck.
         still_walks = _git_stdout_lines(repo_root, ["rev-list", "--count", "HEAD"]) and \
-            _git_stdout_lines(repo_root, ["rev-list", "--count", "--all"])
+            _git_stdout_lines(repo_root, ["rev-list", "--count", "--all", "--reflog"])
         if not still_walks:
             shallow_path.write_text(original, encoding="utf-8")
             logger.debug("shallow prune self-check failed; grafts restored")

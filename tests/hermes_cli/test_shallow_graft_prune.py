@@ -66,6 +66,10 @@ def test_prunes_orphaned_grafts_keeps_referenced_boundaries(tmp_path):
     head_sha = _git(clone, "rev-parse", "HEAD")
     tip_sha = _git(clone, "rev-parse", "origin/main")
 
+    # The middle fetched tip remains reachable through origin/main's reflog.
+    assert prune_stale_shallow_grafts(clone) == 0
+    _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
+
     removed = prune_stale_shallow_grafts(clone)
 
     assert removed == 1  # the middle, now-unreferenced tip
@@ -77,6 +81,7 @@ def test_prunes_orphaned_grafts_keeps_referenced_boundaries(tmp_path):
 
 def test_prune_is_idempotent_and_noop_without_grafts(tmp_path):
     clone = _mk_shallow_scenario(tmp_path)
+    _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
     assert prune_stale_shallow_grafts(clone) == 1
     assert prune_stale_shallow_grafts(clone) == 0  # nothing left to drop
 
@@ -125,3 +130,31 @@ def test_update_check_prunes_and_reports_count(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert prune_calls == [tmp_path]
     assert "pruned 2 stale shallow graft(s)" in out
+
+
+def test_prune_preserves_reflog_history_walks(tmp_path):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "t@example.com")
+    _git(origin, "config", "user.name", "t")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c0")
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(clone)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    # Skip a parent so the next fetched tip depends on its shallow boundary.
+    for message in ("c1", "c2"):
+        _git(origin, "commit", "--allow-empty", "-q", "-m", message)
+    _git(clone, "fetch", "-q", "--depth", "1", "origin", "main")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c3")
+    _git(clone, "fetch", "-q", "--depth", "1", "origin", "main")
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert _git(clone, "rev-list", "--count", "--all", "--reflog")
+    assert _git(clone, "fsck", "--connectivity-only") == ""
+    _git(clone, "gc", "-q")
