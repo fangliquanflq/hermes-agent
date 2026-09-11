@@ -747,7 +747,17 @@ class TestClassifyApiError:
 
     # ── Provider-specific: Anthropic thinking signature ──
 
-
+    def test_kimi_reasoning_details_invalid_type_is_thinking_signature(self):
+        message = "the reasoning_details at position 2 entry 0 has an invalid type"
+        e = MockAPIError(
+            f"Error code: 400 - {message}",
+            status_code=400,
+            body={"error": {"message": message, "type": "invalid_request_error"}},
+        )
+        result = classify_api_error(e, provider="custom", model="k3")
+        assert result.reason == FailoverReason.thinking_signature
+        assert result.retryable is True
+        assert result.should_compress is False
 
 
 
