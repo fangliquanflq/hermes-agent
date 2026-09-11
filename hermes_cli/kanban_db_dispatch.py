@@ -1152,9 +1152,9 @@ def check_respawn_guard(
     #    LATEST run only: a newer crash/completion supersedes the rate-limit run.
     rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
     latest_run = conn.execute(
-        "SELECT outcome, ended_at FROM task_runs "
+        "SELECT id, outcome, ended_at FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY ended_at DESC LIMIT 1",
+        "ORDER BY ended_at DESC, id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
     if latest_run is not None and latest_run["outcome"] == "rate_limited":
@@ -1180,7 +1180,33 @@ def check_respawn_guard(
     if lane == "review":
         return None
 
-    # 3. Completed run within guard window. Exception: an explicit re-queue
+    # 3. A parent-free dependency block has no graph edge that can release it.
+    #    recompute_ready promotes the todo row vacuously, but its bare
+    #    ``promoted`` event is bookkeeping rather than new input. Hold until a
+    #    later operator action/comment appears. Event ids, unlike second-grain
+    #    timestamps, give deterministic ordering when block and input share a
+    #    second. Tasks with real parents retain normal dependency auto-resume.
+    if latest_run is not None and latest_run["outcome"] == "blocked":
+        has_parent = conn.execute(
+            "SELECT 1 FROM task_links WHERE child_id = ? LIMIT 1", (task_id,),
+        ).fetchone()
+        if not has_parent:
+            run_event = conn.execute(
+                "SELECT MAX(id) AS id FROM task_events WHERE run_id = ?",
+                (int(latest_run["id"]),),
+            ).fetchone()
+            run_event_id = int(run_event["id"] or 0) if run_event else 0
+            released = conn.execute(
+                "SELECT 1 FROM task_events "
+                "WHERE task_id = ? AND id > ? "
+                "AND kind IN ('commented', 'unblocked', 'status', 'promoted_manual') "
+                "LIMIT 1",
+                (task_id, run_event_id),
+            ).fetchone()
+            if not released:
+                return "blocked_no_input"
+
+    # 4. Completed run within guard window. Exception: an explicit re-queue
     #    AFTER that success (done→ready drag, re-promotion, unblock, reclaim) is
     #    a deliberate "run it again" — otherwise a manual done→ready would sit
     #    silently held until the window elapses.
@@ -1203,7 +1229,7 @@ def check_respawn_guard(
         if not requeued_after:
             return "recent_success"
 
-    # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
+    # 5. GitHub PR URL in a recent comment — prior worker already opened a PR.
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
     for c in conn.execute(
         "SELECT body FROM task_comments WHERE task_id = ? AND created_at >= ?",

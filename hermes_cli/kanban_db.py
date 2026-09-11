@@ -3256,17 +3256,25 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    """Explicitly resume a blocked/scheduled task or a dependency-blocked
+    ``todo``/``ready`` task, parent re-gated and with leaked runs closed."""
     now = int(time.time())
     with write_txn(conn):
+        current_status = _task_status(conn, task_id)
+        if current_status in ("todo", "ready"):
+            latest = conn.execute(
+                "SELECT outcome FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
+                "ORDER BY ended_at DESC, id DESC LIMIT 1", (task_id,),
+            ).fetchone()
+            if latest is None or latest["outcome"] != "blocked":
+                return False
         resume_status = (
             _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
+            if current_status in ("blocked", "todo", "ready")
             else "ready"
         )
         _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
+            conn, task_id, statuses=("blocked", "scheduled", "todo", "ready"), now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
@@ -3284,7 +3292,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
+            "WHERE id = ? AND status IN ('blocked', 'scheduled', 'todo', 'ready')",
+            (new_status, task_id),
         )
         if cur.rowcount != 1:
             return False
