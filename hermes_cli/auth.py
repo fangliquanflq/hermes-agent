@@ -435,6 +435,26 @@ def is_rate_limited_auth_error(error: Exception) -> bool:
             and error.code == CODEX_RATE_LIMITED_CODE)
 
 
+_NON_FALLBACK_AUTH_CODES = frozenset({
+    "invalid_provider",
+    "missing_api_key",
+    "no_provider_configured",
+})
+
+
+def should_try_fallback_on_auth_error(error: Exception) -> bool:
+    """Whether provider fallback may recover from an auth-resolution failure.
+
+    A provider that was never configured cannot be repaired by silently running
+    the request under a different account. Unknown and transient auth failures
+    retain the existing fallback behavior.
+    """
+    return not (
+        isinstance(error, AuthError)
+        and error.code in _NON_FALLBACK_AUTH_CODES
+    )
+
+
 # Entitlement failures: Nous gets a Portal-aware message; other providers a fixed generic one (or
 # the raw error when no generic text exists for the code).
 _GENERIC_ENTITLEMENT_MESSAGES = {
