@@ -450,6 +450,26 @@ class TestBusySessionAck:
         assert "iteration 3" in content
         assert str(sys.maxsize) not in content
 
+    @pytest.mark.asyncio
+    async def test_customer_facing_redirect_processes_input_without_ack(self, monkeypatch):
+        import gateway.run as gateway_run
+
+        config = {"display": {"platforms": {"telegram": {"operator_notices": False}}}}
+        monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: config)
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="Use the corrected address")
+        session_key = build_session_key(event.source)
+        agent = MagicMock()
+        agent.redirect.return_value = True
+        runner._running_agents[session_key] = agent
+        runner.adapters[event.source.platform] = adapter
+
+        assert await runner._handle_active_session_busy_message(event, session_key) is True
+        agent.redirect.assert_called_once()
+        adapter._send_with_retry.assert_not_awaited()
+
 
 class TestBusySessionOnboardingHint:
     """First-touch hint appended to the busy-ack the first time it fires."""

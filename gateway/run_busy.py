@@ -728,6 +728,11 @@ class GatewayBusySessionMixin:
             logger.debug("Busy ack suppressed for session %s", session_key)
             return True  # input still processed, just no ack sent
 
+        from gateway.run import _gateway_operator_notices_enabled
+        if not _gateway_operator_notices_enabled(event.source.platform):
+            logger.debug("Busy ack suppressed for customer-facing session %s", session_key)
+            return True
+
         # Debounce (30s) before the config-heavy display lookup.
         now = time.time()
         if now - (_busy_state.turn.busy_ack_ts if _busy_state else 0) < 30:

@@ -2174,6 +2174,8 @@ Signal is listed as a valid platform key because the setting can be saved per pl
 
 `show_commentary` (default `true`) controls Codex Responses models' commentary channel — the polished progress narration these models produce alongside their private reasoning. When enabled, each completed commentary message is delivered as a visible mid-turn update (on the gateway this also requires `interim_assistant_messages`). Set it to `false` if the extra narration annoys you: commentary then falls back to the reasoning channel and is only shown when `show_reasoning` is enabled.
 
+For customer-facing messaging deployments, set `display.platforms.<platform>.operator_notices: false`. This keeps operator-only status callbacks, verifier/completion diagnostics, busy acknowledgements, provider diagnostics, and the home-channel setup prompt out of customer chats while leaving normal assistant replies unchanged. Operator notices remain enabled by default for personal and team deployments.
+
 ## Privacy
 
 ```yaml

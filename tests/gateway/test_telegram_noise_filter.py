@@ -1,5 +1,7 @@
 """Gateway noise/secret filtering across chat surfaces (Telegram + siblings)."""
 
+from unittest.mock import patch
+
 import pytest
 
 from agent.conversation_compression import (
@@ -244,6 +246,29 @@ def test_chat_gateways_keep_normal_answers(platform):
     answer = "Here is the clean summary you asked for."
 
     assert _sanitize_gateway_final_response(platform, answer) == answer
+
+
+@pytest.mark.parametrize("platform", CHAT_PLATFORMS)
+def test_customer_facing_gate_suppresses_operator_status_and_final_diagnostics(platform):
+    config = {"display": {"platforms": {platform: {"operator_notices": False}}}}
+    answer = "The requested change is complete."
+    verifier = (
+        "⚠️ File-mutation verifier: 1 file(s) were NOT modified this turn despite any wording above.\n"
+        "  • `/tmp/example.py` — [patch] Could not find a match"
+    )
+
+    with patch("gateway.run._load_gateway_config", return_value=config):
+        assert _prepare_gateway_status_message(
+            platform, "warn", "⚠️ Iteration budget exhausted (15/15) — asking model to summarise"
+        ) is None
+        assert _sanitize_gateway_final_response(platform, f"{answer}\n\n{verifier}") == answer
+        assert _sanitize_gateway_final_response(
+            platform, "⚠️ No reply: the maximum tool-iteration limit was reached."
+        ) == ""
+        assert _sanitize_gateway_final_response(
+            platform, "⚠️ Provider authentication failed: Incorrect API key"
+        ) == ""
+        assert _sanitize_gateway_final_response(platform, answer) == answer
 
 
 @pytest.mark.parametrize("platform", CHAT_PLATFORMS)

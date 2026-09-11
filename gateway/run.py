@@ -452,6 +452,19 @@ def _gateway_platform_value(platform: Any) -> str:
     return str(getattr(platform, "value", platform) or "").strip().lower()
 
 
+def _gateway_operator_notices_enabled(platform: Any) -> bool:
+    """Whether operator-facing diagnostics may be delivered on this platform."""
+    if _gateway_surface_passes_raw_text(platform):
+        return True
+    from gateway.display_config import resolve_display_setting
+
+    return bool(
+        resolve_display_setting(
+            _load_gateway_config(), _gateway_platform_value(platform), "operator_notices", True
+        )
+    )
+
+
 def _non_conversational_metadata(
     metadata: Optional[Dict[str, Any]] = None, *, platform: Any = None) -> Optional[Dict[str, Any]]:
     """Mark Discord lifecycle/status sends without changing other platforms."""
@@ -668,6 +681,19 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
         return ""
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
+    if not _gateway_operator_notices_enabled(platform):
+        # These diagnostics are appended after model generation, so strip only
+        # their terminal sections and preserve any preceding assistant answer.
+        redacted = re.sub(
+            r"(?:\n\s*\n|^)\s*⚠️\s*File-mutation verifier:.*\Z",
+            "", redacted, flags=re.IGNORECASE | re.DOTALL,
+        ).rstrip()
+        redacted = re.sub(
+            r"(?:\n\s*\n|^)\s*⚠️\s*No reply:.*\Z",
+            "", redacted, flags=re.IGNORECASE | re.DOTALL,
+        ).rstrip()
+        if _looks_like_gateway_provider_error(redacted):
+            return ""
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted
@@ -682,6 +708,9 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
         return None
     if _gateway_surface_passes_raw_text(platform):
         return text
+
+    if not _gateway_operator_notices_enabled(platform):
+        return None
 
     text = _redact_gateway_user_facing_secrets(text)
     # Opt-in `compression.progress_notices` lets ROUTINE (template-derived) progress through; other noise stays.
