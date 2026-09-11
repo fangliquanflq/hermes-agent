@@ -293,8 +293,9 @@ describe('ensureHealthyPooledRemoteBackendForDispatch', () => {
     ).resolves.toBe(replacement)
 
     expect(probe).toHaveBeenCalledWith(stale, '/api/status', {
-      timeoutMs: POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS
+      timeoutMs: REMOTE_LIVENESS_TIMEOUT_MS
     })
+    expect(POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS).toBe(REMOTE_LIVENESS_TIMEOUT_MS)
     expect(retire).toHaveBeenCalledOnce()
     expect(reconnect).toHaveBeenCalledOnce()
   })

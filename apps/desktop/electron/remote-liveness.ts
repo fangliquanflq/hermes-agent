@@ -1,9 +1,8 @@
 export const REMOTE_LIVENESS_TIMEOUT_MS = 10_000
-// Dispatch is synchronous user intent: a cached descriptor must prove its
-// forwarded endpoint is alive before it can be returned. Keep this probe much
-// shorter than the background liveness budget so a dead tunnel reconnects
-// promptly instead of making the click feel hung.
-export const POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS = 2_500
+// A newly cached SSH descriptor can become dispatchable before its remote
+// backend has finished a cold start. Give dispatch the same bounded readiness
+// budget as background liveness so a slow boot is not retired and restarted.
+export const POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS = REMOTE_LIVENESS_TIMEOUT_MS
 export const REMOTE_LIVENESS_FAILURE_LIMIT = 3
 // Even at the capped retry path, consecutive liveness observations are at most
 // about 48s apart (ticket mint + socket open + backoff + the next status probe).
