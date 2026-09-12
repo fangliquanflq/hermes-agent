@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+import threading
 from unittest.mock import Mock, patch
 
 import pytest
@@ -185,22 +187,67 @@ class TestLoopbackCdpOverride:
         assert bt_cdp._is_loopback_cdp_override(url) is expected
 
     def test_dns_timeout_is_bounded_and_fails_closed(self, monkeypatch):
-        class TimedOutThread:
-            def __init__(self, *, target, name, daemon):
-                assert daemon is True
+        release = threading.Event()
+        workers = []
 
-            def start(self):
-                pass
+        def blocked_lookup(host, port):
+            workers.append(threading.current_thread())
+            release.wait(10)
+            return [(None, None, None, None, ("127.0.0.1", 0))]
 
-            def join(self, *, timeout):
-                assert timeout == bt_cdp.LOOPBACK_CDP_DNS_TIMEOUT_S
+        monkeypatch.setattr(bt_cdp.socket, "getaddrinfo", blocked_lookup)
+        url = "http://blackholed.test:9222"
+        try:
+            for _ in range(3):
+                assert bt_cdp._is_loopback_cdp_override(url) is False
+            assert len(workers) == 1
+            assert workers[0].daemon and workers[0].is_alive()
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join(timeout=2)
+                assert not worker.is_alive()
 
-            def is_alive(self):
-                return True
+        # A late loopback answer must not grant trust after DNS changes.
+        monkeypatch.setattr(
+            bt_cdp.socket, "getaddrinfo",
+            lambda host, port: [(None, None, None, None, ("192.168.1.5", 0))],
+        )
+        assert bt_cdp._is_loopback_cdp_override(url) is False
 
-        monkeypatch.setattr(bt_cdp.threading, "Thread", TimedOutThread)
+    def test_pending_dns_is_bounded_across_hosts_and_recovers(self, monkeypatch):
+        release = threading.Event()
+        workers = []
 
-        assert bt_cdp._is_loopback_cdp_override("http://blackholed.test:9222") is False
+        def blocked_lookup(host, port):
+            workers.append(threading.current_thread())
+            release.wait(10)
+            return []
+
+        monkeypatch.setattr(bt_cdp.socket, "getaddrinfo", blocked_lookup)
+        capacity = bt_cdp.LOOPBACK_CDP_DNS_MAX_PENDING
+        urls = [f"http://blackholed-{index}.test:9222" for index in range(capacity * 3)]
+        try:
+            with ThreadPoolExecutor(max_workers=len(urls)) as callers:
+                assert not any(callers.map(bt_cdp._is_loopback_cdp_override, urls))
+            assert len(workers) == capacity
+            assert all(worker.daemon and worker.is_alive() for worker in workers)
+            # Saturated DNS must not prevent literal local Chrome from working.
+            assert bt_cdp._is_loopback_cdp_override("http://127.0.0.1:9222") is True
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join(timeout=2)
+                assert not worker.is_alive()
+
+        answers = ["127.0.0.1", "::1"]
+        monkeypatch.setattr(
+            bt_cdp.socket, "getaddrinfo",
+            lambda host, port: [(None, None, None, None, (address, 0)) for address in answers],
+        )
+        assert bt_cdp._is_loopback_cdp_override(urls[0]) is True
+        answers.append("192.168.1.5")
+        assert bt_cdp._is_loopback_cdp_override(urls[0]) is False
 
 
 class TestCreateCdpSession:
