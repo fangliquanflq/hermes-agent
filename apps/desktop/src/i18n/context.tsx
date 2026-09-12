@@ -1,6 +1,12 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 
-import { getHermesConfigRecord, type HermesConfigRecord, saveHermesConfig } from '@/hermes'
+import {
+  captureApiRequestScope,
+  getHermesConfigRecord,
+  type HermesConfigRecord,
+  type ProfileScope,
+  saveHermesConfig
+} from '@/hermes'
 
 import { TRANSLATIONS } from './catalog'
 import {
@@ -16,26 +22,28 @@ import type { Locale, Translations } from './types'
 export { LOCALE_META } from './languages'
 
 export interface I18nConfigClient {
-  getConfig: () => Promise<HermesConfigRecord>
-  saveConfig: (config: HermesConfigRecord) => Promise<{ ok: boolean }>
+  captureScope?: () => ProfileScope
+  getConfig: (scope?: ProfileScope) => Promise<HermesConfigRecord>
+  saveConfig: (config: HermesConfigRecord, scope?: ProfileScope) => Promise<{ ok: boolean }>
 }
 
 const defaultConfigClient: I18nConfigClient = {
-  getConfig: () => {
+  captureScope: captureApiRequestScope,
+  getConfig: scope => {
     if (typeof window === 'undefined' || !window.hermesDesktop?.api) {
       return Promise.resolve({})
     }
 
     // Merged defaults make an unset language indistinguishable from saved English.
     // Older backends ignore the option and keep returning English as before.
-    return getHermesConfigRecord(undefined, { includeDefaults: false })
+    return getHermesConfigRecord(scope, { includeDefaults: false })
   },
-  saveConfig: config => {
+  saveConfig: (config, scope) => {
     if (typeof window === 'undefined' || !window.hermesDesktop?.api) {
       return Promise.resolve({ ok: true })
     }
 
-    return saveHermesConfig(config, undefined, { preserveLanguage: true })
+    return saveHermesConfig(config, scope, { preserveLanguage: true })
   }
 }
 
@@ -212,8 +220,12 @@ export function I18nProvider({ children, configClient = defaultConfigClient, ini
       setIsSavingLocale(true)
 
       try {
-        const latestConfig = await configClient.getConfig()
-        const result = await configClient.saveConfig(withConfigDisplayLanguage(latestConfig, next))
+        const scope = configClient.captureScope?.()
+        const latestConfig = await (scope === undefined ? configClient.getConfig() : configClient.getConfig(scope))
+        const nextConfig = withConfigDisplayLanguage(latestConfig, next)
+        const result = await (scope === undefined
+          ? configClient.saveConfig(nextConfig)
+          : configClient.saveConfig(nextConfig, scope))
 
         if (!result.ok) {
           throw new Error('Failed to save language')

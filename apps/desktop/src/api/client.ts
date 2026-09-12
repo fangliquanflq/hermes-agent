@@ -105,6 +105,16 @@ export function ambientOwnerConnectionId(): string | undefined {
   return _apiConnectionId ?? (_apiLocalMode ? 'local' : undefined)
 }
 
+/** Snapshot the backend owner for a read-modify-write flow. Async UI work must
+ * keep this value and pass it to both calls: reading from source A and later
+ * writing through the then-current ambient source B is a cross-host write. */
+export function captureApiRequestScope(): ProfileScope {
+  return {
+    connectionId: ambientOwnerConnectionId(),
+    profile: _apiProfile
+  }
+}
+
 /** Send a REST request to the renderer's active registry source. Request-level
  *  routing may override the active source for an explicitly-owned resource.
  *

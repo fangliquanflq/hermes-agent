@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, SecretStr, StrictBool, field_validator
 class ConfigUpdate(BaseModel):
     config: dict
     profile: Optional[str] = None
+    allow_default_reset: bool = False
 
 class EnvVarUpdate(BaseModel):
     key: str

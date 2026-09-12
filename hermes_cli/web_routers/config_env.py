@@ -45,6 +45,11 @@ _reveal_timestamps: List[float] = []
 _REVEAL_MAX_PER_WINDOW = 5
 _REVEAL_WINDOW_SECONDS = 30
 
+# A normal settings save changes a handful of leaves. A full factory record
+# read from another host instead resets many populated values at once. Keep the
+# threshold above ordinary multi-field edits; the explicit reset action opts in.
+_DEFAULT_REGRESSION_REJECT_THRESHOLD = 8
+
 # Display order for tabs — unlisted categories sort alphabetically after these.
 _CATEGORY_ORDER = [
     "general", "agent", "terminal", "display", "delegation",
@@ -102,6 +107,29 @@ async def get_schema(profile: Optional[str] = None):
     return {"fields": fields, "category_order": _CATEGORY_ORDER}
 
 
+def _default_regression_paths(existing: dict, incoming: dict) -> list[str]:
+    """Factory-default leaves that would replace non-default target values."""
+    effective_existing = _deep_merge(DEFAULT_CONFIG, existing)
+    regressions: list[str] = []
+
+    def _walk(defaults: dict, current: dict, candidate: dict, prefix: tuple[str, ...] = ()) -> None:
+        for key, default in defaults.items():
+            if key not in candidate:
+                continue
+
+            next_prefix = (*prefix, key)
+            incoming_value = candidate[key]
+            current_value = current.get(key)
+
+            if isinstance(default, dict) and isinstance(incoming_value, dict):
+                _walk(default, current_value if isinstance(current_value, dict) else {}, incoming_value, next_prefix)
+            elif incoming_value == default and current_value != default:
+                regressions.append(".".join(next_prefix))
+
+    _walk(DEFAULT_CONFIG, effective_existing, incoming)
+    return regressions
+
+
 @config_router.get("/api/egress/status")
 async def get_egress_status():
     """Dashboard/Desktop-readable egress proxy status and remediation text."""
@@ -123,6 +151,17 @@ async def update_config(
             with _CONFIG_MUTATION_LOCK:
                 existing = read_raw_config()
                 incoming = _denormalize_config_from_web(body.config)
+                regressions = _default_regression_paths(existing, incoming)
+
+                if len(regressions) >= _DEFAULT_REGRESSION_REJECT_THRESHOLD and not body.allow_default_reset:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Refusing a bulk reset to factory defaults without explicit confirmation "
+                            f"({len(regressions)} populated settings would be reset)."
+                        ),
+                    )
+
                 merged = _deep_merge(existing, incoming)
                 # Compare normalized approvals.mode across the in-memory
                 # documents, not config blocks and not cache re-reads: the page

@@ -78,9 +78,9 @@ export function getHermesConfigRecord(
   })
 }
 
-export function getHermesConfigDefaults(): Promise<HermesConfigRecord> {
-  return hermesApi<HermesConfigRecord>({
-    ...profileScoped(),
+export function getHermesConfigDefaults(profile?: ProfileScope): Promise<HermesConfigRecord> {
+  return window.hermesDesktop.api<HermesConfigRecord>({
+    ...capabilityScoped(profile),
     path: '/api/config/defaults',
     timeoutMs: STARTUP_REQUEST_TIMEOUT_MS
   })
@@ -95,14 +95,17 @@ export function getHermesConfigSchema(profile?: null | string): Promise<ConfigSc
 
 export function saveHermesConfig(
   config: HermesConfigRecord,
-  profile?: null | string,
-  { preserveLanguage = false }: { preserveLanguage?: boolean } = {}
+  profile?: ProfileScope,
+  {
+    allowDefaultReset = false,
+    preserveLanguage = false
+  }: { allowDefaultReset?: boolean; preserveLanguage?: boolean } = {}
 ): Promise<{ ok: boolean }> {
-  return hermesApi<{ ok: boolean }>({
-    ...profileScoped(profile),
+  return window.hermesDesktop.api<{ ok: boolean }>({
+    ...capabilityScoped(profile),
     path: preserveLanguage ? '/api/config?preserve_language=true' : '/api/config',
     method: 'PUT',
-    body: { config }
+    body: { ...(allowDefaultReset ? { allow_default_reset: true } : {}), config }
   })
 }
 

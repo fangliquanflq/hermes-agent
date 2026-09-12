@@ -6,7 +6,14 @@ import { useSearchParams } from 'react-router'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { getElevenLabsVoices, getHermesConfigSchema, saveHermesConfig } from '@/hermes'
+import {
+  captureApiRequestScope,
+  getElevenLabsVoices,
+  getHermesConfigSchema,
+  type ProfileScope,
+  profileScopeKey,
+  saveHermesConfig
+} from '@/hermes'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { confirm } from '@/store/confirm'
@@ -61,14 +68,20 @@ export function ConfigSettings({
   // when the target profile changes — the same guarantee useOnProfileSwitch
   // provides for app-wide switches, without hand-clearing each piece.
   const scopeProfile = useStore($settingsRequestProfile)
+  const requestScope = useMemo<ProfileScope>(() => {
+    const ambient = captureApiRequestScope()
+
+    return typeof ambient === 'object' ? { ...ambient, profile: scopeProfile ?? ambient.profile } : ambient
+  }, [scopeProfile])
 
   return (
     <ConfigSettingsInner
       activeSectionId={activeSectionId}
       importInputRef={importInputRef}
-      key={scopeProfile ?? '__active__'}
+      key={profileScopeKey(requestScope)}
       onConfigSaved={onConfigSaved}
       onMainModelChanged={onMainModelChanged}
+      requestScope={requestScope}
       scopeProfile={scopeProfile}
     />
   )
@@ -86,8 +99,9 @@ function ConfigSettingsInner({
   onConfigSaved,
   onMainModelChanged,
   importInputRef,
+  requestScope,
   scopeProfile
-}: ConfigSettingsProps & { scopeProfile: string | undefined }) {
+}: ConfigSettingsProps & { requestScope: ProfileScope; scopeProfile: string | undefined }) {
   const { t } = useI18n()
   const c = t.settings.config
   const keepAwake = useStore($keepAwake)
@@ -96,10 +110,10 @@ function ConfigSettingsInner({
   // from — and saved back through — the shared config cache, so edits are visible
   // in the MCP/model surfaces and reopening the page doesn't reload-flash.
   const [config, setConfig] = useState<HermesConfigRecord | null>(null)
-  const { data: loadedConfig, isError: configLoadFailed, refetch: refetchConfig } = useHermesConfigRecord(scopeProfile)
+  const { data: loadedConfig, isError: configLoadFailed, refetch: refetchConfig } = useHermesConfigRecord(requestScope)
   // Writes land on the same cache key the query above reads (base key when
   // following the active profile, suffixed when a scope override is set).
-  const writeConfigCache = useMemo(() => hermesConfigCacheWriter(scopeProfile), [scopeProfile])
+  const writeConfigCache = useMemo(() => hermesConfigCacheWriter(requestScope), [requestScope])
 
   const {
     data: schemaResponse,
@@ -133,6 +147,7 @@ function ConfigSettingsInner({
   // resolve after a newer one and re-advance the baseline / cache with stale
   // data — each save's diff+request only starts once the previous one lands.
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const allowDefaultResetRef = useRef(false)
 
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
@@ -198,7 +213,9 @@ function ConfigSettingsInner({
       saveQueueRef.current = saveQueueRef.current.then(async () => {
         try {
           const patch = diffConfig(configBaselineRef.current ?? {}, snapshot)
-          const result = await saveHermesConfig(patch, scopeProfile)
+          const allowDefaultReset = allowDefaultResetRef.current
+          allowDefaultResetRef.current = false
+          const result = await saveHermesConfig(patch, requestScope, { allowDefaultReset })
 
           if (!result.ok) {
             throw new Error(c.autosaveFailed)
@@ -238,7 +255,7 @@ function ConfigSettingsInner({
 
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- copy is stable; avoid re-scheduling autosave on locale change
-  }, [config, onConfigSaved, saveVersion])
+  }, [config, onConfigSaved, requestScope, saveVersion])
 
   const applyConfig = (next: HermesConfigRecord) => {
     saveVersionRef.current += 1
@@ -326,6 +343,7 @@ function ConfigSettingsInner({
 
     reader.onload = () => {
       try {
+        allowDefaultResetRef.current = true
         updateConfig(JSON.parse(String(reader.result)))
         notify({ kind: 'success', title: c.imported, message: t.common.saving })
       } catch (err) {

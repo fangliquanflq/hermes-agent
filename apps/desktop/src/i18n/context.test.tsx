@@ -184,6 +184,30 @@ describe('I18nProvider', () => {
     })
   })
 
+  it('uses one captured backend scope for the language read and write', async () => {
+    const scope = { connectionId: 'remote-a', profile: 'default' }
+    const getConfig = vi.fn().mockResolvedValue({ display: { language: 'en' } })
+    const saveConfig = vi.fn().mockResolvedValue({ ok: true })
+    const configClient: I18nConfigClient = {
+      captureScope: () => scope,
+      getConfig,
+      saveConfig
+    }
+
+    render(
+      <I18nProvider configClient={configClient}>
+        <LanguageProbe target="ja" />
+      </I18nProvider>
+    )
+
+    await waitFor(() => expect(screen.getByTestId('loading').textContent).toBe('false'))
+    fireEvent.click(screen.getByRole('button', { name: 'switch' }))
+    await waitFor(() => expect(saveConfig).toHaveBeenCalledTimes(1))
+
+    expect(getConfig).toHaveBeenLastCalledWith(scope)
+    expect(saveConfig).toHaveBeenCalledWith({ display: { language: 'ja' } }, scope)
+  })
+
   it('saves newly supported locales to display.language', async () => {
     const saveConfig = vi.fn().mockResolvedValue({ ok: true })
 
