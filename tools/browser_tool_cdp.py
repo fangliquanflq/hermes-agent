@@ -14,6 +14,9 @@ from tools.browser_tool_origin import origin_module as _origin
 
 
 LOOPBACK_CDP_DNS_TIMEOUT_S = 0.25
+LOOPBACK_CDP_DNS_MAX_PENDING = 4
+_loopback_cdp_dns_lock = threading.Lock()
+_loopback_cdp_dns_pending: dict[str, tuple[threading.Thread, list[bool]]] = {}
 
 
 def _is_loopback_cdp_override(cdp_url: str) -> bool:
@@ -36,17 +39,36 @@ def _is_loopback_cdp_override(cdp_url: str) -> bool:
     except ValueError:
         pass
 
-    result: list[bool] = []
+    with _loopback_cdp_dns_lock:
+        pending = _loopback_cdp_dns_pending.get(host)
+        if pending is not None:
+            worker, result = pending
+        else:
+            # getaddrinfo cannot be cancelled. Share outstanding lookups and cap
+            # their total so repeated timeouts cannot accumulate blocked threads.
+            if len(_loopback_cdp_dns_pending) >= LOOPBACK_CDP_DNS_MAX_PENDING:
+                return False
+            result: list[bool] = []
 
-    def resolve() -> None:
-        try:
-            addresses = {item[4][0] for item in socket.getaddrinfo(host, None)}
-            result.append(bool(addresses) and all(ipaddress.ip_address(address).is_loopback for address in addresses))
-        except (OSError, ValueError):
-            result.append(False)
+            def resolve() -> None:
+                try:
+                    addresses = {item[4][0] for item in socket.getaddrinfo(host, None)}
+                    result.append(bool(addresses) and all(ipaddress.ip_address(address).is_loopback for address in addresses))
+                except (OSError, ValueError):
+                    result.append(False)
+                finally:
+                    # Completed answers are never cached: the next call must
+                    # classify fresh DNS answers before granting local trust.
+                    with _loopback_cdp_dns_lock:
+                        _loopback_cdp_dns_pending.pop(host, None)
 
-    worker = threading.Thread(target=resolve, name="hermes-cdp-loopback-dns", daemon=True)
-    worker.start()
+            worker = threading.Thread(target=resolve, name="hermes-cdp-loopback-dns", daemon=True)
+            _loopback_cdp_dns_pending[host] = worker, result
+            try:
+                worker.start()
+            except RuntimeError:
+                _loopback_cdp_dns_pending.pop(host, None)
+                return False
     worker.join(timeout=LOOPBACK_CDP_DNS_TIMEOUT_S)
     return not worker.is_alive() and result == [True]
 
