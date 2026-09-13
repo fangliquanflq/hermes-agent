@@ -173,8 +173,10 @@ def _marker_obligation_is_fulfilled(marker: dict, receipt: dict) -> bool:
     runtimes = plan.get("runtimes")
     if not isinstance(runtimes, list):
         return False
+    if plan.get("inventory_complete") is not True:
+        return False
     if not runtimes:
-        return plan.get("inventory_complete") is True
+        return True
     owed: dict[str, int] = {}
     for runtime in runtimes:
         if not isinstance(runtime, dict) or runtime.get("kind") != "gateway":
@@ -593,6 +595,9 @@ def _apply_pending_fleet_restart_catchup() -> None:
         _clear_fleet_restart_pending_marker()
         return
     print("  ⚠ Fleet restart incomplete. Recover with: hermes gateway restart")
+    if marker_path.is_file():
+        print("  After manually restarting every Hermes runtime, remove the unresolved marker:")
+        print(f"    {marker_path}")
     sys.exit(1)
 
 

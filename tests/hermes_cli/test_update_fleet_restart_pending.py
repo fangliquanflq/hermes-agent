@@ -211,7 +211,7 @@ def test_verified_successor_fulfills_exact_marker_generation(monkeypatch):
         "pid": 99999999,
         "update_id": _UPDATE_ID,
         "post_update": {"sha": sha},
-        "plan": {"runtimes": [
+        "plan": {"inventory_complete": True, "runtimes": [
             {"kind": "gateway", "profile": "default", "pid": 99999998}
         ]},
     }), encoding="utf-8")
@@ -248,7 +248,7 @@ def test_live_old_generation_prevents_successor_from_fulfilling_marker(monkeypat
         "pid": 99999999,
         "update_id": _UPDATE_ID,
         "post_update": {"sha": sha},
-        "plan": {"runtimes": [
+        "plan": {"inventory_complete": True, "runtimes": [
             {"kind": "gateway", "profile": "default", "pid": os.getpid()}
         ]},
     }), encoding="utf-8")
@@ -277,7 +277,7 @@ def test_reused_pid_and_target_sha_cannot_select_historical_receipt(monkeypatch)
         "pid": 99999999,
         "update_id": "fedcba9876543210fedcba9876543210",
         "post_update": {"sha": sha},
-        "plan": {"runtimes": [
+        "plan": {"inventory_complete": True, "runtimes": [
             {"kind": "gateway", "profile": "default", "pid": 99999998}
         ]},
     }), encoding="utf-8")
@@ -303,7 +303,7 @@ def test_multiple_profiles_require_identity_matched_successors(monkeypatch):
         "pid": 99999999,
         "update_id": _UPDATE_ID,
         "post_update": {"sha": sha},
-        "plan": {"runtimes": [
+        "plan": {"inventory_complete": True, "runtimes": [
             {"kind": "gateway", "profile": "default", "pid": 99999998},
             {"kind": "gateway", "profile": "work", "pid": 99999997},
         ]},
@@ -350,7 +350,10 @@ def test_catchup_rechecks_generation_before_clearing_marker(monkeypatch):
         "pid": 99999999,
         "update_id": _UPDATE_ID,
         "post_update": {"sha": "abc123"},
-        "plan": {"runtimes": [{"kind": "gateway", "profile": "default", "pid": 42}]},
+        "plan": {
+            "inventory_complete": True,
+            "runtimes": [{"kind": "gateway", "profile": "default", "pid": 42}],
+        },
     }
     (receipt_dir / "latest.json").write_text(json.dumps(receipt), encoding="utf-8")
     pending = iter([True, False])
@@ -442,7 +445,7 @@ def test_non_finite_marker_timestamp_remains_pending(monkeypatch, started):
     ).strip()
     marker = update_cmd._fleet_restart_pending_marker_path()
     marker.write_text(
-        f"started={started}\npid=99999999\nexpected_sha={sha}\n",
+        _marker_body(started=started, expected_sha=sha),
         encoding="utf-8",
     )
     receipt_dir = get_hermes_home() / "logs" / "update_receipts"

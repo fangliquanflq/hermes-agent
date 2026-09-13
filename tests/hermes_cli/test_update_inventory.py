@@ -50,6 +50,7 @@ class TestCollectInventory:
         assert plan.updatable_in_place is True
         assert plan.expected_sha == "a" * 40
         assert plan.profiles == ["default", "work"]
+        assert plan.inventory_errors == []
         assert len(plan.runtimes) == 2
         by_profile = {r.profile: r for r in plan.runtimes}
         assert by_profile["default"].pid == 100
@@ -114,6 +115,7 @@ class TestCollectInventory:
         plan = ui.collect_runtime_inventory()
         assert plan.runtimes == []
         assert plan.install_method == "unknown"
+        assert plan.inventory_errors
 
     def test_plan_serializes_for_receipt(self, fleet):
         plan = ui.collect_runtime_inventory()
@@ -167,6 +169,7 @@ class TestReceiptIntegration:
         path = ur.finalize_update_receipt("success")
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["plan"]["install_method"] == "git"
+        assert payload["plan"]["inventory_complete"] is True
         assert len(payload["plan"]["runtimes"]) == 2
 
     def test_noop_without_active_receipt(self, fleet):
