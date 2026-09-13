@@ -24,7 +24,9 @@ import pytest
 from hermes_cli.local_runtime.catalog import (
     CATALOG,
     PLEASANT_FLOOR_TOK_S,
+    PLEASANT_REFERENCE_TURN_S,
     predicted_decode_tok_s,
+    predicted_reference_turn_s,
     recommended_entry,
     select_variant,
 )
@@ -151,6 +153,23 @@ def test_unified_never_recommends_a_below_floor_dense_model():
     ]
     if clears:
         assert predicted_decode_tok_s(entry, choice.variant, budget) >= PLEASANT_FLOOR_TOK_S
+
+
+def test_recommendation_prices_prefill_before_quality():
+    budget = _unified(128)
+    pick = recommended_entry(budget)[0]
+    choice = select_variant(pick, budget)
+    assert choice is not None
+    _, turn_s = predicted_reference_turn_s(pick, choice.variant, budget)
+    assert turn_s <= PLEASANT_REFERENCE_TURN_S
+
+    higher_quality = [entry for entry in CATALOG if entry.quality > pick.quality]
+    assert higher_quality
+    for entry in higher_quality:
+        candidate = select_variant(entry, budget)
+        if candidate is not None and candidate.zero_spill:
+            _, candidate_turn_s = predicted_reference_turn_s(entry, candidate.variant, budget)
+            assert candidate_turn_s > PLEASANT_REFERENCE_TURN_S
 
 
 def test_quality_decides_where_speed_permits():
