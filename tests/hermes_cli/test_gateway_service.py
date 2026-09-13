@@ -217,6 +217,45 @@ class TestServiceIdentityForForeignHome:
         monkeypatch.setenv("HERMES_HOME", str(default_home / "profiles" / "alpha"))
         assert gateway_cli.get_service_name() == "hermes-gateway-alpha"
 
+    def test_restart_uses_owned_legacy_bare_unit(self, machine_home, tmp_path, monkeypatch):
+        custom_home = tmp_path / "custom-hermes"
+        custom_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(custom_home))
+        legacy = machine_home / ".config" / "systemd" / "user" / "hermes-gateway.service"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(
+            f'[Service]\nEnvironment="HERMES_HOME={custom_home}"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(gateway_cli, "supports_systemd_services", lambda: True)
+        monkeypatch.setattr(gateway_cli, "_refuse_from_inside_gateway", lambda *a, **k: None)
+        monkeypatch.setattr(gateway_cli, "_dispatch_via_service_manager_if_s6", lambda *a, **k: False)
+        calls = []
+        monkeypatch.setattr(gateway_cli, "_service_call", lambda *a: calls.append(a))
+        foreground = []
+        monkeypatch.setattr(gateway_cli, "run_gateway", lambda **k: foreground.append(k))
+
+        gateway_cli._cmd_restart(SimpleNamespace(system=False, all=False))
+
+        assert calls == [("systemd", "restart", False)]
+        assert gateway_cli._resolved_systemd_service_name() == "hermes-gateway"
+        assert foreground == []
+
+    def test_foreign_legacy_bare_unit_is_not_claimed(self, machine_home, tmp_path, monkeypatch):
+        custom_home = tmp_path / "custom-hermes"
+        custom_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(custom_home))
+        legacy = machine_home / ".config" / "systemd" / "user" / "hermes-gateway.service"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(
+            '[Service]\nEnvironment="HERMES_HOME=/somewhere/else"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(gateway_cli, "supports_systemd_services", lambda: True)
+
+        assert gateway_cli._owned_legacy_systemd_unit_path() is None
+        assert gateway_cli._systemd_unit_installed() is False
+
 
 class TestUninstallRefusesForeignUnit:
     """systemd_uninstall must not stop/disable/unlink a unit pinned to another HERMES_HOME."""
