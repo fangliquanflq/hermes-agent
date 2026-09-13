@@ -333,17 +333,21 @@ export async function duplicateBot(bot: RosterRow, roster: RosterRow[]) {
     throw new Error('No free name for the duplicate.')
   }
 
+  const meta = $botMeta.get()[botMetaKey(bot)]
+  const sourceTitle = meta?.title?.trim() || bot.display_name?.trim() || ''
+  const copySuffix = ' (copy)'
+  const title = sourceTitle ? `${sourceTitle.slice(0, 64 - copySuffix.length)}${copySuffix}` : ''
+
   await requestForBot(bot, 'profiles.create', {
     name,
     clone_from: base,
+    display_name: title,
     description: bot.description || ''
   })
 
   // Same look: avatar shape/color/image and a "(copy)" title so the two
   // are tellable apart in the roster until the user renames. Do not copy
   // chat or created. Those belong to the original bot.
-  const meta = $botMeta.get()[botMetaKey(bot)]
-
   if (meta) {
     const { chat, created, ...look } = meta
     await saveBotMeta(
@@ -359,7 +363,7 @@ export async function duplicateBot(bot: RosterRow, roster: RosterRow[]) {
       } as RosterRow,
       {
         ...look,
-        title: meta.title ? `${meta.title} (copy)` : ''
+        title
       }
     )
   }

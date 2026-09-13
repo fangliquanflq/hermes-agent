@@ -381,6 +381,7 @@ export function CreateAgentDialog({ open, onClose, roster }: CreateAgentDialogPr
       const descriptionText = [title, description].filter(Boolean).join(' — ')
       await requestForTarget('profiles.create', {
         name: slug,
+        display_name: title.trim(),
         description: descriptionText,
         // Clone sources are profiles of the TARGET backend. The picker's
         // roster is the local one, so a remote create always starts from the
@@ -673,7 +674,12 @@ export function CreateAgentDialog({ open, onClose, roster }: CreateAgentDialogPr
           ) : null}
           {labeled(
             'Title',
-            <Input onChange={event => setTitle(event.target.value)} placeholder="Inbox Triage" value={title} />
+            <Input
+              maxLength={64}
+              onChange={event => setTitle(event.target.value)}
+              placeholder="Inbox Triage"
+              value={title}
+            />
           )}
           {labeled(
             'Description',

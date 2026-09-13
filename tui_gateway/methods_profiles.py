@@ -340,7 +340,7 @@ def _mirror_launch_credentials(path, params: dict) -> dict:
 
 @method("profiles.create")
 def _(rid, params: dict) -> dict:
-    """Create a profile (ws twin of POST /api/profiles). Params: ``name``, ``description``,
+    """Create a profile (ws twin of POST /api/profiles). Params: ``name``, ``display_name``, ``description``,
     ``clone_from`` (omitted = fresh + bundled skills), ``clone_all``, ``clone_channels`` (opt-in: keep the
     source's bot tokens/allowlists — default strips them so two profiles never hold one bot), ``no_skills``, ``soul``,
     ``model`` + ``provider``, ``share_auth``, ``no_alias``, ``mirror_credentials`` (default true: a bare
@@ -357,7 +357,9 @@ def _(rid, params: dict) -> dict:
             clone_config=bool(clone_from) and not clone_all,
             no_skills=is_truthy_value(params.get("no_skills", False)),
             description=str(params.get("description") or "").strip() or None,
-            clone_channels=is_truthy_value(params.get("clone_channels", False)))
+            clone_channels=is_truthy_value(params.get("clone_channels", False)),
+            display_name=str(params.get("display_name") or "").strip()
+            if "display_name" in params else None)
     except (ValueError, FileExistsError, FileNotFoundError) as e:
         return _err(rid, 4062, str(e))
     except Exception as e:

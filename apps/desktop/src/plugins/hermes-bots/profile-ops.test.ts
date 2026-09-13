@@ -90,6 +90,7 @@ describe('duplicating a bot', () => {
 
     expect(calls.find(call => call.method === 'profiles.create')?.params).toMatchObject({
       clone_from: 'researcher',
+      display_name: 'Researcher (copy)',
       name: 'researcher-2'
     })
 
