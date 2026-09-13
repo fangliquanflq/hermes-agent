@@ -173,6 +173,8 @@ def _marker_obligation_is_fulfilled(marker: dict, receipt: dict) -> bool:
     runtimes = plan.get("runtimes")
     if not isinstance(runtimes, list):
         return False
+    if not runtimes:
+        return plan.get("inventory_complete") is True
     owed: dict[str, int] = {}
     for runtime in runtimes:
         if not isinstance(runtime, dict) or runtime.get("kind") != "gateway":
@@ -191,8 +193,6 @@ def _marker_obligation_is_fulfilled(marker: dict, receipt: dict) -> bool:
         ):
             return False
         owed[profile] = old_pid
-    if not owed:
-        return False
 
     homes = dict(_profile_homes())
     for profile, old_pid in owed.items():

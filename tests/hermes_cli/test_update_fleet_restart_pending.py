@@ -322,6 +322,25 @@ def test_multiple_profiles_require_identity_matched_successors(monkeypatch):
     assert update_cmd._pending_fleet_restart_needed() is False
 
 
+@pytest.mark.parametrize(("inventory_complete", "pending"), [(True, False), (None, True)])
+def test_empty_worklist_requires_completed_inventory(inventory_complete, pending):
+    marker = update_cmd._fleet_restart_pending_marker_path()
+    marker.write_text(_marker_body(started=1, expected_sha="abc123"), encoding="utf-8")
+    receipt_dir = get_hermes_home() / "logs" / "update_receipts"
+    receipt_dir.mkdir(parents=True)
+    plan = {"runtimes": []}
+    if inventory_complete is not None:
+        plan["inventory_complete"] = inventory_complete
+    (receipt_dir / "latest.json").write_text(json.dumps({
+        "pid": 99999999,
+        "update_id": _UPDATE_ID,
+        "post_update": {"sha": "abc123"},
+        "plan": plan,
+    }), encoding="utf-8")
+
+    assert update_cmd._pending_fleet_restart_needed() is pending
+
+
 def test_catchup_rechecks_generation_before_clearing_marker(monkeypatch):
     marker = update_cmd._fleet_restart_pending_marker_path()
     marker.write_text(_marker_body(started=1, expected_sha="abc123"), encoding="utf-8")
@@ -354,21 +373,36 @@ def test_catchup_rechecks_generation_before_clearing_marker(monkeypatch):
     [
         pytest.param("completion", [], id="completion-list"),
         pytest.param("receipt", [], id="receipt-list"),
-        pytest.param("receipt", {"pid": 99999999, "post_update": []}, id="post-update-list"),
         pytest.param(
             "receipt",
-            {"pid": 99999999, "post_update": {"sha": "abc123"}, "plan": []},
+            {"pid": 99999999, "update_id": _UPDATE_ID, "post_update": []},
+            id="post-update-list",
+        ),
+        pytest.param(
+            "receipt",
+            {
+                "pid": 99999999,
+                "update_id": _UPDATE_ID,
+                "post_update": {"sha": "abc123"},
+                "plan": [],
+            },
             id="plan-list",
         ),
         pytest.param(
             "receipt",
-            {"pid": 99999999, "post_update": {"sha": "abc123"}, "plan": {"runtimes": {}}},
+            {
+                "pid": 99999999,
+                "update_id": _UPDATE_ID,
+                "post_update": {"sha": "abc123"},
+                "plan": {"runtimes": {}},
+            },
             id="runtimes-object",
         ),
         pytest.param(
             "receipt",
             {
                 "pid": 99999999,
+                "update_id": _UPDATE_ID,
                 "post_update": {"sha": "abc123"},
                 "plan": {"runtimes": [{"kind": "gateway", "profile": [], "pid": 99999998}]},
             },
@@ -378,6 +412,7 @@ def test_catchup_rechecks_generation_before_clearing_marker(monkeypatch):
             "receipt",
             {
                 "pid": 99999999,
+                "update_id": _UPDATE_ID,
                 "post_update": {"sha": "abc123"},
                 "plan": {"runtimes": [{"kind": "gateway", "profile": {}, "pid": 99999998}]},
             },
@@ -387,7 +422,7 @@ def test_catchup_rechecks_generation_before_clearing_marker(monkeypatch):
 )
 def test_wrong_persisted_container_shapes_remain_pending(target, payload):
     marker = update_cmd._fleet_restart_pending_marker_path()
-    marker.write_text("started=1\npid=99999999\nexpected_sha=abc123\n", encoding="utf-8")
+    marker.write_text(_marker_body(started=1, expected_sha="abc123"), encoding="utf-8")
     receipt_dir = get_hermes_home() / "logs" / "update_receipts"
     receipt_dir.mkdir(parents=True)
     path = (
@@ -793,7 +828,13 @@ def test_interrupt_between_pull_and_restart_leaves_marker(
 
     marker = update_cmd._fleet_restart_pending_marker_path()
     assert marker.is_file()
-    assert "expected_sha=def456" in marker.read_text(encoding="utf-8")
+    marker_fields = dict(
+        line.split("=", 1) for line in marker.read_text(encoding="utf-8").splitlines()
+    )
+    assert marker_fields["expected_sha"] == "def456"
+    receipt = json.loads((get_hermes_home() / "logs" / "update_receipts" / "latest.json").read_text(encoding="utf-8"))
+    assert marker_fields["update_id"] == receipt["update_id"]
+    assert receipt["plan"]["inventory_complete"] is True
 
 
 def test_already_up_to_date_runs_pending_restart_when_marker_present(
