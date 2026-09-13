@@ -32,6 +32,7 @@ def fleet(monkeypatch, tmp_path):
     monkeypatch.setattr("hermes_cli.profiles._PROFILE_ID_RE", re.compile(r"^[a-z0-9][a-z0-9_-]*$"), raising=False)
     monkeypatch.setattr("gateway.status._pid_exists", lambda pid: pid in (100, 200))
     monkeypatch.setattr("hermes_cli.gateway._get_service_pids", lambda all_profiles=False: {100})
+    monkeypatch.setattr("hermes_cli.gateway.find_windows_gateway_services", lambda: [])
     monkeypatch.setattr("hermes_cli.gateway.supports_systemd_services", lambda: True)
     monkeypatch.setattr("hermes_cli.gateway.find_profile_gateway_processes", lambda exclude_pids=None: [])
     monkeypatch.setattr(

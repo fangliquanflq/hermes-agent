@@ -158,7 +158,7 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     )
     monkeypatch.setattr(
         "hermes_cli.update_inventory.collect_runtime_inventory",
-        lambda: SimpleNamespace(runtimes=[], to_dict=lambda: {}),
+        lambda: SimpleNamespace(runtimes=[], inventory_errors=[], to_dict=lambda: {}),
     )
 
 
