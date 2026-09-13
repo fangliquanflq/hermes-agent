@@ -155,20 +155,24 @@ def test_unified_never_recommends_a_below_floor_dense_model():
 
 
 def test_recommendation_prices_prefill_before_quality():
-    budget = _unified(128)
+    budget = _unified(256)
     pick = recommended_entry(budget)[0]
     choice = select_variant(pick, budget)
     assert choice is not None
     _, turn_s = predicted_reference_turn_s(pick, choice.variant, budget)
     assert turn_s <= PLEASANT_REFERENCE_TURN_S
 
-    higher_quality = [entry for entry in CATALOG if entry.quality > pick.quality]
+    higher_quality = [
+        (entry, candidate)
+        for entry in CATALOG
+        if entry.quality > pick.quality
+        and (candidate := select_variant(entry, budget)) is not None
+        and candidate.zero_spill
+    ]
     assert higher_quality
-    for entry in higher_quality:
-        candidate = select_variant(entry, budget)
-        if candidate is not None and candidate.zero_spill:
-            _, candidate_turn_s = predicted_reference_turn_s(entry, candidate.variant, budget)
-            assert candidate_turn_s > PLEASANT_REFERENCE_TURN_S
+    for entry, candidate in higher_quality:
+        _, candidate_turn_s = predicted_reference_turn_s(entry, candidate.variant, budget)
+        assert candidate_turn_s > PLEASANT_REFERENCE_TURN_S
 
 
 def test_quality_decides_where_speed_permits():
