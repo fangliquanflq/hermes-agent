@@ -46,6 +46,7 @@ export function normalizeProfileKey(name: string | null | undefined): string {
 // `name` remains the identity everywhere.
 export function profileLabel(profile: Pick<ProfileInfo, 'display_name' | 'name' | 'ui_meta'>): string {
   const botMeta = profile.ui_meta?.['hermes-bots']
+
   const botTitle =
     botMeta && typeof botMeta === 'object' && !Array.isArray(botMeta) && typeof botMeta.title === 'string'
       ? botMeta.title.trim()
