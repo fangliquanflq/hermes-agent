@@ -25,6 +25,10 @@ from utils import fast_safe_load
 # path -> raw user mapping from the last successful parse in this process; served (through the
 # normal pipeline) when the file is later found mid-edit as broken YAML.
 _LAST_GOOD_USER_RAW: Dict[str, Dict[str, Any]] = {}
+# path -> file signature accepted into ``_LAST_GOOD_USER_RAW``. The raw-config loader can
+# refresh its shared cache first, so effective-config must independently notice that the
+# matching snapshot is newer than the fallback it currently owns.
+_LAST_GOOD_USER_SIG: Dict[str, Tuple[int, int]] = {}
 # path -> (user_mtime_ns, user_size, managed_mtime_ns, managed_size, effective, env_snapshot).
 _EFFECTIVE_CACHE: Dict[str, Tuple[int, int, int, int, Dict[str, Any], Dict[str, Optional[str]]]] = {}
 
@@ -46,6 +50,21 @@ def _recover_user_raw(config_path: Path, path_key: str, exc: Exception) -> Dict[
         fallback = "last-known-good-backup"
     _config._warn_config_parse_failure(config_path, exc, fallback=fallback if raw is not None else "defaults")
     return copy.deepcopy(raw) if raw is not None else {}
+
+
+def _accept_user_raw(
+    config_path: Path,
+    path_key: str,
+    user_sig: Tuple[int, int],
+    raw: Dict[str, Any],
+) -> None:
+    """Make a successfully consumed raw snapshot the effective loader's recovery point."""
+    previous_sig = _LAST_GOOD_USER_SIG.get(path_key)
+    _LAST_GOOD_USER_RAW[path_key] = copy.deepcopy(raw)
+    _LAST_GOOD_USER_SIG[path_key] = user_sig
+    if previous_sig != user_sig and config_path.resolve() == _config.get_config_path().resolve():
+        from hermes_cli.config_backups import backup_config
+        backup_config(config_path, "good")
 
 
 def load_user_config_effective(config_path: Optional[Path] = None, *, fail_closed: bool = False) -> Dict[str, Any]:
@@ -74,7 +93,7 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
         raw_hit = _config._RAW_CONFIG_CACHE.get(path_key)
         if user_sig is not None and raw_hit is not None and raw_hit[:2] == user_sig:
             raw = copy.deepcopy(raw_hit[2])  # one parse per process, shared with read_raw_config()
-            _LAST_GOOD_USER_RAW.setdefault(path_key, copy.deepcopy(raw))
+            _accept_user_raw(config_path, path_key, user_sig, raw)
         elif user_sig is not None:
             try:
                 with open(config_path, encoding="utf-8") as f:
@@ -86,13 +105,7 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
             else:
                 raw = loaded if isinstance(loaded, dict) else {}
                 _config._RAW_CONFIG_CACHE[path_key] = (*user_sig, copy.deepcopy(raw))
-                _LAST_GOOD_USER_RAW[path_key] = copy.deepcopy(raw)
-                # Same copy load_config keeps: a fresh process recovers from it (see _recover_user_raw).
-                # Only for the ACTIVE home — a read of another profile's file (doctor, TUI cwd lookup)
-                # must not create backups/ inside that profile.
-                if config_path == _config.get_config_path():
-                    from hermes_cli.config_backups import backup_config
-                    backup_config(config_path, "good")
+                _accept_user_raw(config_path, path_key, user_sig, raw)
 
         env_snapshot = _config._env_ref_snapshot(raw)
         managed = managed_scope.load_managed_config()

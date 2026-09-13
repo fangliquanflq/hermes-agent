@@ -29,6 +29,7 @@ def _reset_caches():
     cfg._RAW_CONFIG_CACHE.clear()
     config_effective._EFFECTIVE_CACHE.clear()
     config_effective._LAST_GOOD_USER_RAW.clear()
+    config_effective._LAST_GOOD_USER_SIG.clear()
     managed_scope.invalidate_managed_cache()
 
 
@@ -114,6 +115,32 @@ def test_good_backup_is_written_only_for_the_active_home(homes, tmp_path):
 
     assert not (other / "backups").exists()
     assert list((home / "backups" / "config").glob("config.yaml.good.*"))
+
+
+def test_shared_raw_cache_refresh_replaces_recovery_snapshot(homes, monkeypatch):
+    """A newer valid snapshot consumed from the raw cache becomes the process and disk fallback."""
+    from hermes_cli import config as cfg, config_backups, config_effective
+
+    home, _ = homes
+    config_path = home / "config.yaml"
+    timestamps = iter(("20260101-000001", "20260101-000002"))
+    monkeypatch.setattr(config_backups.time, "strftime", lambda _format: next(timestamps))
+
+    _write(config_path, "approvals:\n  deny: [old]\n")
+    assert config_effective.load_user_config_effective(config_path)["approvals"]["deny"] == ["old"]
+
+    config_path.write_text("approvals:\n  deny: [new]\n", encoding="utf-8")
+    assert cfg.read_raw_config()["approvals"]["deny"] == ["new"]
+    assert config_effective.load_user_config_effective(config_path)["approvals"]["deny"] == ["new"]
+
+    config_path.write_text("approvals: [unterminated\n", encoding="utf-8")
+    _reset_caches_keep_last_good()
+    assert config_effective.load_user_config_effective(config_path)["approvals"]["deny"] == ["new"]
+
+    config_effective._LAST_GOOD_USER_RAW.clear()
+    config_effective._LAST_GOOD_USER_SIG.clear()
+    config_effective._EFFECTIVE_CACHE.clear()
+    assert config_effective.load_user_config_effective(config_path)["approvals"]["deny"] == ["new"]
 
 
 def _reset_caches_keep_last_good():
