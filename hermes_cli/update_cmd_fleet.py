@@ -8,6 +8,7 @@ imported lazily inside each function (no import cycle; test patches stay effecti
 import hashlib
 import json
 import logging
+import math
 from contextlib import suppress
 import os
 import subprocess
@@ -79,7 +80,7 @@ def _parse_fleet_restart_marker(body: bytes) -> dict | None:
         expected_sha = fields["expected_sha"].strip()
     except (KeyError, TypeError, ValueError, UnicodeDecodeError):
         return None
-    if started <= 0 or pid <= 0 or not expected_sha:
+    if not math.isfinite(started) or started <= 0 or pid <= 0 or not expected_sha:
         return None
     return {"started": started, "pid": pid, "expected_sha": expected_sha}
 
@@ -94,6 +95,8 @@ def _marker_completion_matches(marker_body: bytes) -> bool:
     try:
         completed = json.loads(_fleet_restart_completion_path().read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(completed, dict):
         return False
     return completed.get("marker_sha256") == hashlib.sha256(marker_body).hexdigest()
 
@@ -113,7 +116,11 @@ def _matching_marker_receipt(marker: dict) -> tuple[dict, Path] | None:
     for path in paths:
         try:
             receipt = json.loads(path.read_text(encoding="utf-8"))
-            post_update = receipt.get("post_update") or {}
+            if not isinstance(receipt, dict):
+                continue
+            post_update = receipt.get("post_update")
+            if not isinstance(post_update, dict):
+                continue
             if int(receipt.get("pid", 0)) == marker["pid"] and post_update.get("sha") == marker["expected_sha"]:
                 return receipt, path
         except (OSError, TypeError, ValueError):
@@ -145,7 +152,12 @@ def _marker_obligation_is_fulfilled(marker: dict, receipt: dict) -> bool:
     """Prove every gateway owed by *receipt* was replaced after *marker*."""
     from hermes_cli.update_receipt import _profile_homes, _socket_identity
 
-    runtimes = (receipt.get("plan") or {}).get("runtimes") or []
+    plan = receipt.get("plan")
+    if not isinstance(plan, dict):
+        return False
+    runtimes = plan.get("runtimes")
+    if not isinstance(runtimes, list):
+        return False
     owed: dict[str, int] = {}
     for runtime in runtimes:
         if not isinstance(runtime, dict) or runtime.get("kind") != "gateway":
@@ -155,9 +167,15 @@ def _marker_obligation_is_fulfilled(marker: dict, receipt: dict) -> bool:
             old_pid = int(runtime.get("pid"))
         except (TypeError, ValueError):
             return False
-        if not profile or profile == "unknown" or old_pid <= 0 or profile in owed:
+        if (
+            not isinstance(profile, str)
+            or not profile
+            or profile == "unknown"
+            or old_pid <= 0
+            or profile in owed
+        ):
             return False
-        owed[str(profile)] = old_pid
+        owed[profile] = old_pid
     if not owed:
         return False
 

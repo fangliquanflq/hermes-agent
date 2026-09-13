@@ -250,6 +250,95 @@ def test_live_old_generation_prevents_successor_from_fulfilling_marker(monkeypat
         successor.wait(timeout=10)
 
 
+@pytest.mark.parametrize(
+    ("target", "payload"),
+    [
+        pytest.param("completion", [], id="completion-list"),
+        pytest.param("receipt", [], id="receipt-list"),
+        pytest.param("receipt", {"pid": 99999999, "post_update": []}, id="post-update-list"),
+        pytest.param(
+            "receipt",
+            {"pid": 99999999, "post_update": {"sha": "abc123"}, "plan": []},
+            id="plan-list",
+        ),
+        pytest.param(
+            "receipt",
+            {"pid": 99999999, "post_update": {"sha": "abc123"}, "plan": {"runtimes": {}}},
+            id="runtimes-object",
+        ),
+        pytest.param(
+            "receipt",
+            {
+                "pid": 99999999,
+                "post_update": {"sha": "abc123"},
+                "plan": {"runtimes": [{"kind": "gateway", "profile": [], "pid": 99999998}]},
+            },
+            id="profile-list",
+        ),
+        pytest.param(
+            "receipt",
+            {
+                "pid": 99999999,
+                "post_update": {"sha": "abc123"},
+                "plan": {"runtimes": [{"kind": "gateway", "profile": {}, "pid": 99999998}]},
+            },
+            id="profile-object",
+        ),
+    ],
+)
+def test_wrong_persisted_container_shapes_remain_pending(target, payload):
+    marker = update_cmd._fleet_restart_pending_marker_path()
+    marker.write_text("started=1\npid=99999999\nexpected_sha=abc123\n", encoding="utf-8")
+    receipt_dir = get_hermes_home() / "logs" / "update_receipts"
+    receipt_dir.mkdir(parents=True)
+    path = (
+        update_cmd_fleet._fleet_restart_completion_path()
+        if target == "completion"
+        else receipt_dir / "latest.json"
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert update_cmd._pending_fleet_restart_needed() is True
+
+
+@pytest.mark.parametrize("started", ["nan", "inf", "-inf"])
+def test_non_finite_marker_timestamp_remains_pending(monkeypatch, started):
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True
+    ).strip()
+    marker = update_cmd._fleet_restart_pending_marker_path()
+    marker.write_text(
+        f"started={started}\npid=99999999\nexpected_sha={sha}\n",
+        encoding="utf-8",
+    )
+    receipt_dir = get_hermes_home() / "logs" / "update_receipts"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "pid": 99999999,
+                "post_update": {"sha": sha},
+                "plan": {
+                    "runtimes": [
+                        {"kind": "gateway", "profile": "default", "pid": 99999998}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "hermes_cli.update_receipt._profile_homes",
+        lambda: [("default", get_hermes_home())],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.update_receipt._socket_identity",
+        lambda _home: (os.getpid(), {"profile": "default", "code_sha": sha}),
+    )
+
+    assert update_cmd._pending_fleet_restart_needed() is True
+
+
 def test_pending_needed_when_unfinished_receipt_runtime_sha_skews(monkeypatch):
     disk_sha = "e" * 40
     old_sha = "7" * 40
