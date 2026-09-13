@@ -2387,27 +2387,16 @@ def invalidate_env_cache() -> None:
     _env_cache = None
 
 
-def _sanitize_env_lines(lines: list) -> list:
-    """Normalize .env line endings/whitespace without changing assignment semantics.
-    Content after the first ``=`` is opaque value data: a known variable name embedded in a value
-    must never be reinterpreted as another assignment, so concatenated lines stay on one line."""
-    sanitized: list[str] = []
-    for line in lines:
-        raw = line.rstrip("\r\n")
-        stripped = raw.strip()
-        # Blank lines and comments are preserved verbatim.
-        sanitized.append((raw if not stripped or stripped.startswith("#") else stripped) + "\n")
-    return sanitized
-
-
 def sanitize_env_file() -> int:
     """Rewrite ~/.hermes/.env with normalized line formatting; returns the number of changed lines."""
+    from hermes_cli.env_file import sanitize_env_lines
+
     env_path = get_env_path()
     if not env_path.exists():
         return 0
     with open(env_path, encoding="utf-8-sig", errors="replace") as f:
         original_lines = f.readlines()
-    sanitized = _sanitize_env_lines(original_lines)
+    sanitized = sanitize_env_lines(original_lines)
     if sanitized == original_lines:
         return 0
     fixes = abs(len(sanitized) - len(original_lines)) or sum(
@@ -2420,8 +2409,10 @@ def sanitize_env_file() -> int:
 def _read_env_lines(env_path: Path) -> list:
     """Read ``.env`` lines, normalized. Explicit UTF-8 (Windows defaults to cp1252) with BOM
     tolerance (Notepad adds one)."""
+    from hermes_cli.env_file import sanitize_env_lines
+
     with open(env_path, encoding="utf-8-sig", errors="replace") as f:
-        return _sanitize_env_lines(f.readlines())
+        return sanitize_env_lines(f.readlines())
 
 
 def _write_env_lines(env_path: Path, lines: list, *, preserve_mode: bool) -> None:

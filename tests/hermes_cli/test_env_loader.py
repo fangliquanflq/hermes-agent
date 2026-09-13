@@ -1,9 +1,33 @@
+import builtins
 import codecs
 import importlib
 import os
 import sys
 
 from hermes_cli.env_loader import load_hermes_dotenv
+
+
+def test_dotenv_is_applied_before_config_import(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / ".env").write_text("DOTENV_IMPORT_ORDER=loaded\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("DOTENV_IMPORT_ORDER", raising=False)
+
+    observed_values = []
+    original_import = builtins.__import__
+
+    def track_config_import(name, *args, **kwargs):
+        if name == "hermes_cli.config":
+            observed_values.append(os.environ.get("DOTENV_IMPORT_ORDER"))
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", track_config_import)
+
+    load_hermes_dotenv(hermes_home=home, load_external_secrets=False)
+
+    assert observed_values
+    assert set(observed_values) == {"loaded"}
 
 
 def test_recovered_update_retry_skips_external_secret_sources(tmp_path, monkeypatch):

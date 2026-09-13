@@ -30,8 +30,8 @@ from hermes_cli.config import (
     set_config_value,
     unset_config_value,
     write_platform_config_field,
-    _sanitize_env_lines,
 )
+from hermes_cli.env_file import sanitize_env_lines
 
 
 class TestGetHermesHome:
@@ -635,7 +635,7 @@ class TestSanitizeEnvLines:
             "GLM_API_KEY=glm-secret\n",
             "GLM_BASE_URL=https://api.z.ai/api/paas/v4\n",
         ]
-        result = _sanitize_env_lines(lines)
+        result = sanitize_env_lines(lines)
         assert result == lines, f"GLM_* lines were corrupted by suffix collision: {result}"
 
 
