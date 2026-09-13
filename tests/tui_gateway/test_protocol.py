@@ -536,6 +536,10 @@ def test_clarify_block_helper_builds_batch_payload(capture):
             "choices": ["a (Recommended)", "b"], "choices_offered": ["a", "b"],
             "multi_select": False,
         },
+        {
+            "qid": "q1", "id": None, "question": "Why?",
+            "choices": None, "choices_offered": None, "multi_select": False,
+        },
     ]
 
     box = {}
@@ -557,14 +561,18 @@ def test_clarify_block_helper_builds_batch_payload(capture):
         "id": "a", "method": "clarify.respond",
         "params": {"request_id": rid, "question_id": "q0", "answer": "a"},
     })
+    server.handle_request({
+        "id": "b", "method": "clarify.respond",
+        "params": {"request_id": rid, "question_id": "q1", "answer": "because"},
+    })
     thread.join(timeout=5)
 
     messages = [json.loads(line) for line in buf.getvalue().splitlines()]
     request = messages[0]["params"]
     assert request["type"] == "clarify.request"
-    sent = request["payload"]["questions"][0]
-    assert set(sent) == {"qid", "question", "choices", "multi_select"}
-    assert "id" not in sent and "choices_offered" not in sent
+    for sent in request["payload"]["questions"]:
+        assert set(sent) == {"qid", "question", "choices", "multi_select"}
+        assert "id" not in sent and "choices_offered" not in sent
 
 
 def test_approval_pending_replays_unresolved_requests(server, monkeypatch):

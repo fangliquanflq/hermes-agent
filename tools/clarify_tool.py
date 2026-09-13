@@ -165,7 +165,10 @@ def _run_batch(normalized: List[dict], callback, question: str) -> str:
         raw = callback(question, None, questions=normalized)
         timed_out = _is_timeout(raw)
         if isinstance(raw, str):
-            raw = _json_as(raw, dict)  # the sentinel is not JSON -> None, timed_out stays True
+            parsed = _json_as(raw, dict)  # the sentinel is not JSON -> None, timed_out stays True
+            if parsed is None and len(normalized) == 1 and raw:
+                answers[normalized[0]["qid"]] = raw
+            raw = parsed
         if isinstance(raw, dict):
             answers = dict(raw.get("answers") or {})
             timed_out = bool(raw.get("timed_out"))

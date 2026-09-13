@@ -1320,6 +1320,12 @@ def _clarify_block(sid: str, q, c, multi_select=False, questions=None) -> str:
     """Bridge the clarify tool callback onto _block. Single-question payloads keep their historical shape
     (``multi_select`` only when True — older renderers never see a new field); batch calls emit one
     clarify.request with only the wire fields (the tool-side entries carry result-assembly keys too)."""
+    if questions and len(questions) == 1:
+        entry = questions[0]
+        payload = {"question": entry["question"], "choices": entry["choices"]}
+        if entry["multi_select"]:
+            payload["multi_select"] = True
+        return _block("clarify.request", sid, payload, timeout=_clarify_timeout_seconds())
     if questions:
         wire = [{"qid": e["qid"], "question": e["question"], "choices": e["choices"], "multi_select": bool(e["multi_select"])}
                 for e in questions]

@@ -20864,6 +20864,35 @@ def test_clarify_callback_multi_select_hint(monkeypatch):
     assert captured["payload"] == {"question": "Pick one", "choices": ["a", "b"]}
 
 
+def test_clarify_callback_one_question_batch_uses_legacy_wire(monkeypatch):
+    """A one-entry tool batch remains renderable by clients that only know the
+    historical single-question frame."""
+    captured = {}
+
+    def fake_block(event, sid, payload, timeout=300, batch_qids=None):
+        captured.update(payload=payload, batch_qids=batch_qids)
+        return "blue"
+
+    monkeypatch.setattr(server, "_block", fake_block)
+    cb = server._agent_cbs("sid-1")["clarify_callback"]
+    result = cb(
+        "",
+        None,
+        questions=[{
+            "qid": "q0",
+            "question": "Pick one",
+            "choices": ["blue", "green"],
+            "multi_select": False,
+        }],
+    )
+
+    assert result == "blue"
+    assert captured == {
+        "payload": {"question": "Pick one", "choices": ["blue", "green"]},
+        "batch_qids": None,
+    }
+
+
 @pytest.mark.parametrize(
     ("configured", "expected"),
     [(0, None), (-1, None), (42, 42)],

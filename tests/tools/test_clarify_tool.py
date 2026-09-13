@@ -530,6 +530,17 @@ class TestClarifyBatchDispatch:
         ))
         assert result["responses"][0]["user_response"] == "picked"
 
+    def test_one_question_batch_maps_legacy_callback_response(self):
+        """A batch-capable bridge may downgrade one question to its legacy wire,
+        whose response is the bare answer rather than an answers mapping."""
+        def cb(question, choices, multi_select=False, questions=None):
+            return "picked"
+
+        result = json.loads(clarify_tool(
+            "", questions=[{"question": "One?"}], callback=cb,
+        ))
+        assert result["responses"][0]["user_response"] == "picked"
+
     def test_batch_recommended_label_stripped_per_question(self):
         def cb(question, choices, multi_select=False, questions=None):
             return {"answers": {"q0": questions[0]["choices"][0]}}
