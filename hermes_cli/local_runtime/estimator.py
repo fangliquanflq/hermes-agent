@@ -76,21 +76,24 @@ class HardwareBudget:
 def profile_from_gguf(header: GGUFHeader) -> ModelProfile:
     kv_heads = header.head_counts_kv()
     dk, dv = header.head_dim_k, header.head_dim_v
+    dk_swa, dv_swa = header.head_dim_k_swa, header.head_dim_v_swa
+    swa_pattern = header.sliding_window_pattern()
+    has_swa_pattern = header.sliding_window > 0 and len(swa_pattern) == len(kv_heads)
     swa_fraction = _SWA_LAYER_FRACTION.get(header.architecture, 0.0)
-    has_swa = header.sliding_window > 0 and swa_fraction > 0
+    has_swa_fallback = header.sliding_window > 0 and swa_fraction > 0
 
     layers: list[tuple[LayerKind, int]] = []
     n_attn_seen = 0
     n_attn_total = sum(1 for h in kv_heads if h > 0)
-    n_swa = round(n_attn_total * swa_fraction) if has_swa else 0
-    for heads in kv_heads:
+    n_swa = round(n_attn_total * swa_fraction) if has_swa_fallback else 0
+    for index, heads in enumerate(kv_heads):
         if heads == 0:
             layers.append((LayerKind.RECURRENT, 0))
             continue
-        per_token = round(heads * (dk + dv) * _F16_BYTES_PER_ELEM)
-        # Distribute the SWA share across the first n_swa attention layers; only the full/SWA
-        # SPLIT matters to the totals, not which indexes.
-        kind = LayerKind.SWA if n_attn_seen < n_swa else LayerKind.FULL
+        is_swa = swa_pattern[index] if has_swa_pattern else n_attn_seen < n_swa
+        kind = LayerKind.SWA if is_swa else LayerKind.FULL
+        dim_k, dim_v = (dk_swa, dv_swa) if is_swa else (dk, dv)
+        per_token = round(heads * (dim_k + dim_v) * _F16_BYTES_PER_ELEM)
         layers.append((kind, per_token))
         n_attn_seen += 1
 

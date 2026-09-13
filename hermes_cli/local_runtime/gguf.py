@@ -134,6 +134,13 @@ class GGUFHeader:
                     for i in range(self.n_layer)]
         return [scalar] * self.n_layer
 
+    def sliding_window_pattern(self) -> list[bool]:
+        """Per-layer SWA markers, or empty when the metadata cannot describe every layer."""
+        value = self._arch_key("attention.sliding_window_pattern")
+        if not isinstance(value, list) or len(value) != self.n_layer:
+            return []
+        return [bool(item) for item in value]
+
     @property
     def head_dim_k(self) -> int:
         v = self._arch_key("attention.key_length")
@@ -147,6 +154,14 @@ class GGUFHeader:
         if v:
             return int(v)
         return self.head_dim_k
+
+    @property
+    def head_dim_k_swa(self) -> int:
+        return int(self._arch_key("attention.key_length_swa") or self.head_dim_k)
+
+    @property
+    def head_dim_v_swa(self) -> int:
+        return int(self._arch_key("attention.value_length_swa") or self.head_dim_v)
 
 
 def read_gguf_header(path: str | Path) -> GGUFHeader:
