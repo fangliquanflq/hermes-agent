@@ -802,6 +802,8 @@ def test_already_up_to_date_runs_pending_restart_when_marker_present(
     args = _update_args()
     _patch_update_deps(monkeypatch, tmp_path, _make_up_to_date_side_effect())
     update_cmd._write_fleet_restart_pending_marker(expected_sha="def456")
+    pending = iter([True, False])
+    monkeypatch.setattr(update_cmd_fleet, "_pending_fleet_restart_needed", lambda: next(pending))
 
     seen = {"ran": False}
 
@@ -825,6 +827,8 @@ def test_already_up_to_date_runs_pending_restart_when_receipt_skewed(
 ):
     args = _update_args()
     _patch_update_deps(monkeypatch, tmp_path, _make_up_to_date_side_effect())
+    pending = iter([True, False])
+    monkeypatch.setattr(update_cmd_fleet, "_pending_fleet_restart_needed", lambda: next(pending))
 
     disk_sha = "e" * 40
     monkeypatch.setattr(update_cmd, "_current_checkout_sha", lambda: disk_sha)

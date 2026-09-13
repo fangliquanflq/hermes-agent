@@ -584,7 +584,12 @@ def _apply_pending_fleet_restart_catchup() -> None:
         receipt = matched[0] if matched is not None else None
     except OSError:
         pass
-    if _run_pending_fleet_restart(receipt=receipt) and not _pending_fleet_restart_needed():
+    restart_ok = (
+        _run_pending_fleet_restart(receipt=receipt)
+        if receipt is not None
+        else _run_pending_fleet_restart()
+    )
+    if restart_ok and not _pending_fleet_restart_needed():
         _clear_fleet_restart_pending_marker()
         return
     print("  ⚠ Fleet restart incomplete. Recover with: hermes gateway restart")
