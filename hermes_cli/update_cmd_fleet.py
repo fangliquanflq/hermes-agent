@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import time as _time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,7 +58,12 @@ def _write_fleet_restart_pending_marker(*, expected_sha: str = "") -> None:
         logger.debug("Skipping fleet-restart-pending marker under pytest (live checkout)")
         return
     try:
+        from hermes_cli.update_receipt import current_update_id
+
         lines = [f"started={_time.time()}", f"pid={os.getpid()}"]
+        update_id = current_update_id()
+        if update_id:
+            lines.append(f"update_id={update_id}")
         if expected_sha:
             lines.append(f"expected_sha={expected_sha}")
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -78,11 +84,16 @@ def _parse_fleet_restart_marker(body: bytes) -> dict | None:
         started = float(fields["started"])
         pid = int(fields["pid"])
         expected_sha = fields["expected_sha"].strip()
+        update_id = fields["update_id"].strip()
     except (KeyError, TypeError, ValueError, UnicodeDecodeError):
         return None
-    if not math.isfinite(started) or started <= 0 or pid <= 0 or not expected_sha:
+    try:
+        valid_update_id = uuid.UUID(update_id).hex == update_id
+    except (ValueError, AttributeError):
+        valid_update_id = False
+    if not math.isfinite(started) or started <= 0 or pid <= 0 or not expected_sha or not valid_update_id:
         return None
-    return {"started": started, "pid": pid, "expected_sha": expected_sha}
+    return {"started": started, "pid": pid, "expected_sha": expected_sha, "update_id": update_id}
 
 
 def _fleet_restart_completion_path() -> Path:
@@ -121,7 +132,11 @@ def _matching_marker_receipt(marker: dict) -> tuple[dict, Path] | None:
             post_update = receipt.get("post_update")
             if not isinstance(post_update, dict):
                 continue
-            if int(receipt.get("pid", 0)) == marker["pid"] and post_update.get("sha") == marker["expected_sha"]:
+            if (
+                int(receipt.get("pid", 0)) == marker["pid"]
+                and receipt.get("update_id") == marker["update_id"]
+                and post_update.get("sha") == marker["expected_sha"]
+            ):
                 return receipt, path
         except (OSError, TypeError, ValueError):
             continue
@@ -186,7 +201,11 @@ def _marker_obligation_is_fulfilled(marker: dict, receipt: dict) -> bool:
         if socket is None:
             return False
         successor_pid, identity = socket
-        if successor_pid == old_pid or not _sha_includes(identity.get("code_sha"), marker["expected_sha"]):
+        if (
+            successor_pid == old_pid
+            or identity.get("profile") != profile
+            or not _sha_includes(identity.get("code_sha"), marker["expected_sha"])
+        ):
             return False
         try:
             import psutil
@@ -214,6 +233,7 @@ def _record_fleet_restart_completion(marker_body: bytes, marker: dict, receipt_p
             "marker_sha256": hashlib.sha256(marker_body).hexdigest(),
             "expected_sha": marker["expected_sha"],
             "updater_pid": marker["pid"],
+            "update_id": marker["update_id"],
             "source_receipt": receipt_path.name,
             "completed_at": _time.time(),
         }
@@ -441,7 +461,7 @@ def _restart_systemd_gateway_units_best_effort(failed: list, listings) -> None:
     failed.extend(f"systemd-{scope} (listing unavailable)" for scope, _ in _SYSTEMD_SCOPES if scope not in answered)
 
 
-def _run_pending_fleet_restart() -> bool:
+def _run_pending_fleet_restart(*, receipt: dict | None = None) -> bool:
     """Catch-up restart for gateways left on pre-update code. Never raises.
 
     True when all discovered targets recovered (or none exist); False if incomplete.
@@ -472,6 +492,21 @@ def _run_pending_fleet_restart() -> bool:
         pids = None
 
     failed: list = []
+    if receipt is not None:
+        plan = receipt.get("plan") if isinstance(receipt, dict) else None
+        runtimes = plan.get("runtimes") if isinstance(plan, dict) else None
+        if not isinstance(runtimes, list):
+            failed.append("recorded fleet worklist (invalid)")
+        else:
+            for runtime in runtimes:
+                if not isinstance(runtime, dict):
+                    failed.append("recorded fleet runtime (invalid)")
+                    continue
+                if runtime.get("kind") != "gateway":
+                    failed.append(
+                        f"{runtime.get('kind') or 'unknown'}:{runtime.get('profile') or 'unknown'}"
+                        " (no verified catch-up path)"
+                    )
     try:
         # Snapshot before stopping: Restart=no units can disappear from list-units on a clean exit.
         systemd_listings = list(_systemd_gateway_unit_listings()) if supports_systemd_services() else None
@@ -482,9 +517,18 @@ def _run_pending_fleet_restart() -> bool:
             except Exception:
                 leftover = list(pids or [])
             if leftover:
-                with _best_effort('Pending fleet restart: PID stop failed: %s'):
+                try:
                     kill_gateway_processes(all_profiles=True)
-                    _wait_for_gateway_exit(timeout=5.0, force_after=None)
+                except Exception as exc:
+                    logger.debug("Pending fleet restart: PID stop failed: %s", exc)
+                    failed.append("gateway processes (stop failed)")
+                else:
+                    try:
+                        if not _wait_for_gateway_exit(timeout=5.0, force_after=None):
+                            failed.append("gateway processes (still running)")
+                    except Exception as exc:
+                        logger.debug("Pending fleet restart: PID wait failed: %s", exc)
+                        failed.append("gateway processes (wait failed)")
         # --- Systemd services (Linux) --- Discover all hermes-gateway* units (default + profiles) plus
         # hermes-serve* units (the Desktop app's backend, #83438).
         if systemd_listings is not None:
@@ -532,7 +576,15 @@ def _apply_pending_fleet_restart_catchup() -> None:
     print()
     _warn_pending_fleet_restart()
     print("→ Running the pending fleet restart...")
-    if _run_pending_fleet_restart():
+    receipt = None
+    marker_path = _fleet_restart_pending_marker_path()
+    try:
+        marker = _parse_fleet_restart_marker(marker_path.read_bytes())
+        matched = _matching_marker_receipt(marker) if marker is not None else None
+        receipt = matched[0] if matched is not None else None
+    except OSError:
+        pass
+    if _run_pending_fleet_restart(receipt=receipt) and not _pending_fleet_restart_needed():
         _clear_fleet_restart_pending_marker()
         return
     print("  ⚠ Fleet restart incomplete. Recover with: hermes gateway restart")

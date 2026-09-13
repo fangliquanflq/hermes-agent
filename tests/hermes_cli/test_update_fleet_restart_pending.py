@@ -33,7 +33,15 @@ from hermes_cli import update_cmd
 import hermes_cli.update_cmd_fleet as update_cmd_fleet
 import hermes_cli.update_cmd_deps as update_cmd_deps
 from hermes_cli.update_receipt import COMMAND_BOUNDARY_STOP_REASON
+import hermes_cli.update_receipt as update_receipt
 from hermes_constants import get_hermes_home
+
+
+_UPDATE_ID = "0123456789abcdef0123456789abcdef"
+
+
+def _marker_body(*, started, expected_sha, pid=99999999, update_id=_UPDATE_ID):
+    return f"started={started}\npid={pid}\nupdate_id={update_id}\nexpected_sha={expected_sha}\n"
 
 
 def _make_head_moved_side_effect(pre_sha="abc123", post_sha="def456"):
@@ -163,17 +171,19 @@ def _update_args():
 # ---------------------------------------------------------------------------
 
 
-def test_marker_round_trip_under_hermes_home():
+def test_marker_round_trip_under_hermes_home(monkeypatch):
     path = update_cmd._fleet_restart_pending_marker_path()
     assert path.parent == get_hermes_home()
     assert path.name == "fleet_restart_pending"
     assert not path.exists()
 
+    monkeypatch.setattr(update_receipt, "current_update_id", lambda: _UPDATE_ID)
     update_cmd._write_fleet_restart_pending_marker(expected_sha="abc123")
     assert path.is_file()
     body = path.read_text(encoding="utf-8")
     assert "started=" in body
     assert "pid=" in body
+    assert f"update_id={_UPDATE_ID}" in body
     assert "expected_sha=abc123" in body
 
     update_cmd._clear_fleet_restart_pending_marker()
@@ -193,12 +203,13 @@ def test_verified_successor_fulfills_exact_marker_generation(monkeypatch):
     ).strip()
     started = psutil.Process().create_time() - 1
     marker = update_cmd._fleet_restart_pending_marker_path()
-    marker.write_text(f"started={started}\npid=99999999\nexpected_sha={sha}\n", encoding="utf-8")
+    marker.write_text(_marker_body(started=started, expected_sha=sha), encoding="utf-8")
     original = marker.read_bytes()
     receipt_dir = get_hermes_home() / "logs" / "update_receipts"
     receipt_dir.mkdir(parents=True)
     (receipt_dir / "latest.json").write_text(json.dumps({
         "pid": 99999999,
+        "update_id": _UPDATE_ID,
         "post_update": {"sha": sha},
         "plan": {"runtimes": [
             {"kind": "gateway", "profile": "default", "pid": 99999998}
@@ -214,8 +225,11 @@ def test_verified_successor_fulfills_exact_marker_generation(monkeypatch):
     assert marker.read_bytes() == original
     completed = json.loads(update_cmd_fleet._fleet_restart_completion_path().read_text(encoding="utf-8"))
     assert completed["expected_sha"] == sha
+    assert completed["update_id"] == _UPDATE_ID
 
-    marker.write_text(f"started={started + 1}\npid=99999997\nexpected_sha={sha}\n", encoding="utf-8")
+    marker.write_text(
+        _marker_body(started=started + 1, pid=99999997, expected_sha=sha), encoding="utf-8"
+    )
     assert update_cmd._pending_fleet_restart_needed() is True
 
 
@@ -225,13 +239,14 @@ def test_live_old_generation_prevents_successor_from_fulfilling_marker(monkeypat
     ).strip()
     marker = update_cmd._fleet_restart_pending_marker_path()
     marker.write_text(
-        f"started={psutil.Process().create_time() - 1}\npid=99999999\nexpected_sha={sha}\n",
+        _marker_body(started=psutil.Process().create_time() - 1, expected_sha=sha),
         encoding="utf-8",
     )
     receipt_dir = get_hermes_home() / "logs" / "update_receipts"
     receipt_dir.mkdir(parents=True)
     (receipt_dir / "latest.json").write_text(json.dumps({
         "pid": 99999999,
+        "update_id": _UPDATE_ID,
         "post_update": {"sha": sha},
         "plan": {"runtimes": [
             {"kind": "gateway", "profile": "default", "pid": os.getpid()}
@@ -248,6 +263,90 @@ def test_live_old_generation_prevents_successor_from_fulfilling_marker(monkeypat
     finally:
         successor.terminate()
         successor.wait(timeout=10)
+
+
+def test_reused_pid_and_target_sha_cannot_select_historical_receipt(monkeypatch):
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True
+    ).strip()
+    marker = update_cmd._fleet_restart_pending_marker_path()
+    marker.write_text(_marker_body(started=psutil.Process().create_time() - 1, expected_sha=sha), encoding="utf-8")
+    receipt_dir = get_hermes_home() / "logs" / "update_receipts"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "latest.json").write_text(json.dumps({
+        "pid": 99999999,
+        "update_id": "fedcba9876543210fedcba9876543210",
+        "post_update": {"sha": sha},
+        "plan": {"runtimes": [
+            {"kind": "gateway", "profile": "default", "pid": 99999998}
+        ]},
+    }), encoding="utf-8")
+    monkeypatch.setattr("hermes_cli.update_receipt._profile_homes", lambda: [("default", get_hermes_home())])
+    monkeypatch.setattr(
+        "hermes_cli.update_receipt._socket_identity",
+        lambda _home: (os.getpid(), {"profile": "default", "code_sha": sha}),
+    )
+
+    assert update_cmd._pending_fleet_restart_needed() is True
+    assert not update_cmd_fleet._fleet_restart_completion_path().exists()
+
+
+def test_multiple_profiles_require_identity_matched_successors(monkeypatch):
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True
+    ).strip()
+    marker = update_cmd._fleet_restart_pending_marker_path()
+    marker.write_text(_marker_body(started=psutil.Process().create_time() - 1, expected_sha=sha), encoding="utf-8")
+    receipt_dir = get_hermes_home() / "logs" / "update_receipts"
+    receipt_dir.mkdir(parents=True)
+    receipt = {
+        "pid": 99999999,
+        "update_id": _UPDATE_ID,
+        "post_update": {"sha": sha},
+        "plan": {"runtimes": [
+            {"kind": "gateway", "profile": "default", "pid": 99999998},
+            {"kind": "gateway", "profile": "work", "pid": 99999997},
+        ]},
+    }
+    (receipt_dir / "latest.json").write_text(json.dumps(receipt), encoding="utf-8")
+    homes = [("default", get_hermes_home()), ("work", get_hermes_home() / "profiles" / "work")]
+    monkeypatch.setattr("hermes_cli.update_receipt._profile_homes", lambda: homes)
+    monkeypatch.setattr(
+        "hermes_cli.update_receipt._socket_identity",
+        lambda home: (
+            os.getpid(),
+            {"profile": "default" if home == homes[0][1] else "work", "code_sha": sha},
+        ),
+    )
+
+    assert update_cmd._pending_fleet_restart_needed() is False
+
+
+def test_catchup_rechecks_generation_before_clearing_marker(monkeypatch):
+    marker = update_cmd._fleet_restart_pending_marker_path()
+    marker.write_text(_marker_body(started=1, expected_sha="abc123"), encoding="utf-8")
+    receipt_dir = get_hermes_home() / "logs" / "update_receipts"
+    receipt_dir.mkdir(parents=True)
+    receipt = {
+        "pid": 99999999,
+        "update_id": _UPDATE_ID,
+        "post_update": {"sha": "abc123"},
+        "plan": {"runtimes": [{"kind": "gateway", "profile": "default", "pid": 42}]},
+    }
+    (receipt_dir / "latest.json").write_text(json.dumps(receipt), encoding="utf-8")
+    pending = iter([True, False])
+    seen = []
+    monkeypatch.setattr(update_cmd_fleet, "_pending_fleet_restart_needed", lambda: next(pending))
+    monkeypatch.setattr(
+        update_cmd,
+        "_run_pending_fleet_restart",
+        lambda *, receipt=None: seen.append(receipt) or True,
+    )
+    monkeypatch.setattr(update_cmd_fleet, "_clear_fleet_restart_pending_marker", lambda: seen.append("cleared"))
+
+    update_cmd_fleet._apply_pending_fleet_restart_catchup()
+
+    assert seen == [receipt, "cleared"]
 
 
 @pytest.mark.parametrize(
@@ -513,6 +612,50 @@ def test_run_pending_restart_true_when_no_gateways(monkeypatch, capsys):
     ])
     assert update_cmd._run_pending_fleet_restart() is True
     assert "Pending fleet restart completed" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind", ["serve", "dashboard"])
+def test_pending_restart_rejects_unsupported_receipt_runtime(monkeypatch, kind):
+    monkeypatch.setattr("hermes_cli.gateway.find_gateway_pids", lambda **_kwargs: [])
+    monkeypatch.setattr("hermes_cli.gateway.supports_systemd_services", lambda: False)
+    monkeypatch.setattr("hermes_cli.gateway.is_macos", lambda: False)
+    monkeypatch.setattr("hermes_cli.gateway.is_windows", lambda: False)
+    receipt = {"plan": {"runtimes": [{"kind": kind, "profile": "default", "pid": 42}]}}
+
+    assert update_cmd._run_pending_fleet_restart(receipt=receipt) is False
+
+
+@pytest.mark.parametrize("failure", ["kill", "wait"])
+def test_pending_restart_fails_when_old_gateway_cannot_be_stopped(monkeypatch, failure):
+    monkeypatch.setattr("hermes_cli.gateway.find_gateway_pids", lambda **_kwargs: [42])
+    monkeypatch.setattr("hermes_cli.gateway.supports_systemd_services", lambda: False)
+    monkeypatch.setattr("hermes_cli.gateway.is_macos", lambda: False)
+    monkeypatch.setattr("hermes_cli.gateway.is_windows", lambda: False)
+    if failure == "kill":
+        monkeypatch.setattr(
+            "hermes_cli.gateway.kill_gateway_processes",
+            lambda **_kwargs: (_ for _ in ()).throw(OSError("denied")),
+        )
+        monkeypatch.setattr("hermes_cli.gateway._wait_for_gateway_exit", lambda **_kwargs: True)
+    else:
+        monkeypatch.setattr("hermes_cli.gateway.kill_gateway_processes", lambda **_kwargs: 1)
+        monkeypatch.setattr("hermes_cli.gateway._wait_for_gateway_exit", lambda **_kwargs: False)
+
+    assert update_cmd._run_pending_fleet_restart() is False
+
+
+def test_pending_restart_fails_when_one_supervisor_scope_fails(monkeypatch):
+    monkeypatch.setattr("hermes_cli.gateway.find_gateway_pids", lambda **_kwargs: [])
+    monkeypatch.setattr("hermes_cli.gateway.supports_systemd_services", lambda: True)
+    monkeypatch.setattr("hermes_cli.gateway.is_macos", lambda: False)
+    monkeypatch.setattr("hermes_cli.gateway.is_windows", lambda: False)
+    listings = [
+        ("user", ["systemctl", "--user"], SimpleNamespace(returncode=1, stdout="")),
+        ("system", ["systemctl"], SimpleNamespace(returncode=0, stdout="")),
+    ]
+    monkeypatch.setattr(update_cmd_fleet, "_systemd_gateway_unit_listings", lambda: listings)
+
+    assert update_cmd._run_pending_fleet_restart() is False
 
 
 # ---------------------------------------------------------------------------
