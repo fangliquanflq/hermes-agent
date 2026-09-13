@@ -386,6 +386,33 @@ def _recover_format_errors(
         )
         return True
 
+    # OpenAI-compatible providers carry opaque encrypted replay state inside
+    # ``reasoning_details``. Caller rotation can invalidate that state while the
+    # canonical history remains sound, so repair only the ephemeral wire copy.
+    if (
+        classified.reason == FailoverReason.invalid_encrypted_content
+        and not _retry.invalid_encrypted_content_retry_attempted
+        and agent.api_mode != "codex_responses"
+    ):
+        stripped = 0
+        for api_message in api_messages:
+            if isinstance(api_message, dict) and "reasoning_details" in api_message:
+                api_message.pop("reasoning_details", None)
+                stripped += 1
+        if stripped:
+            _retry.invalid_encrypted_content_retry_attempted = True
+            _vlines(
+                agent,
+                f"⚠️  Encrypted reasoning replay was rejected by the provider — "
+                f"stripped replay state from {stripped} message(s), retrying...",
+            )
+            logger.warning(
+                "%sInvalid encrypted reasoning recovery: stripped reasoning_details from %d api_messages "
+                "(canonical messages unchanged)",
+                agent.log_prefix, stripped,
+            )
+            return True
+
     # 400 ``invalid_encrypted_content`` on a stale ``codex_reasoning_items`` blob:
     # disable replay for the session, strip cached items, retry once.
     if (

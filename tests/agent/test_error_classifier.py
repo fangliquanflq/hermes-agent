@@ -807,6 +807,20 @@ class TestClassifyApiError:
         assert result.retryable is True
         assert result.should_fallback is False
 
+    def test_caller_bound_reasoning_rejection_is_invalid_encrypted_content(self):
+        message = "reasoning `encrypted_content` was not issued to this caller"
+        e = MockAPIError(
+            f"Error from provider (Console): Upstream request failed: [invalid_request_error] {message}",
+            status_code=400,
+            body={"error": {"message": message, "type": "invalid_request_error"}},
+        )
+
+        result = classify_api_error(e, provider="opencode-free", model="muse-spark-1.3-contributor-free")
+
+        assert result.reason == FailoverReason.invalid_encrypted_content
+        assert result.retryable is True
+        assert result.should_fallback is False
+
     # ── Reasoning-mandatory route rejecting a disable ──
 
     def test_reasoning_mandatory_400_is_retryable_not_format_error(self):

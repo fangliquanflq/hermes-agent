@@ -777,6 +777,10 @@ def _classify_400(c: _Ctx) -> Verdict:
     ) or "could not decrypt the provided encrypted_content" in msg or (
         # Azure Foundry (gpt-6-astra) rejects replayed reasoning from several prior responses this way (#105369).
         "conflicting authenticated continuation identities" in msg
+    ) or (
+        # OpenCode free-tier callers can rotate between turns; replaying an opaque blob minted by the prior
+        # caller is rejected even though the surrounding OpenRouter-style reasoning_details remain valid.
+        "reasoning `encrypted_content` was not issued to this caller" in msg
     ):
         return _V_INVALID_ENCRYPTED
     # Reasoning-mandatory route rejecting a disable (GLM-5.3 on Nous Portal / OpenRouter). Deterministic
