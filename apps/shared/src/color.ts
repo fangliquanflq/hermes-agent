@@ -94,6 +94,8 @@ export function contrastRatio(a: string, b: string): null | number {
 }
 
 const DEFAULT_INKS = ['#000000', '#ffffff'] as const
+const DEFAULT_CONTRAST_STEP = 0.2
+const MAX_CONTRAST_STEPS = 1000
 
 /**
  * The readable ink for a background: whichever candidate MEASURES better.
@@ -129,14 +131,17 @@ export function readableOn(bg: string, inks: readonly [string, ...string[]] = DE
  * exponentially, and the color stops at the first rung that passes. Returns
  * the original when it already passes or isn't parseable.
  *
- * `step` is the rung size. The default 0.2 (5 rungs) is the desktop's ladder
- * and MUST stay: `--dt-primary-solid` for every shipped preset is derived
- * from it and a finer ladder lands visibly different fills (nous `#3b6acb` vs
- * `#3f70d8`). The TUI's chainable form opts into 0.05 for less hue loss.
- * The accumulating loop (rather than `i * step`) is deliberate — it is the
- * exact float sequence the old desktop ladder produced.
+ * `step` is the rung size. Non-finite and non-positive values use the default;
+ * values above 1 are clamped to 1. The search is bounded independently of the
+ * rung size and falls back to the pole, so every numeric input terminates.
+ * The default 0.2 (5 rungs) is the desktop's ladder and MUST stay:
+ * `--dt-primary-solid` for every shipped preset is derived from it and a finer
+ * ladder lands visibly different fills (nous `#3b6acb` vs `#3f70d8`). The
+ * TUI's chainable form opts into 0.05 for less hue loss. The accumulating loop
+ * (rather than `i * step`) is deliberate — it is the exact float sequence the
+ * old desktop ladder produced.
  */
-export function ensureContrast(color: string, bg: string, min: number, step = 0.2): string {
+export function ensureContrast(color: string, bg: string, min: number, step = DEFAULT_CONTRAST_STEP): string {
   const bgLuminance = relativeLuminance(bg)
 
   if (bgLuminance === null || parseColor(color) === null) {
@@ -150,9 +155,10 @@ export function ensureContrast(color: string, bg: string, min: number, step = 0.
   }
 
   const pole = bgLuminance < 0.5 ? '#ffffff' : '#000000'
+  const rungSize = Number.isFinite(step) && step > 0 ? Math.min(step, 1) : DEFAULT_CONTRAST_STEP
   let best = color
 
-  for (let amount = step; amount <= 1.0001; amount += step) {
+  for (let rung = 0, amount = rungSize; rung < MAX_CONTRAST_STEPS && amount <= 1.0001; rung += 1, amount += rungSize) {
     best = mix(color, pole, Math.min(amount, 1))
 
     const stepRatio = contrastRatio(best, bg)
@@ -162,7 +168,7 @@ export function ensureContrast(color: string, bg: string, min: number, step = 0.
     }
   }
 
-  return best
+  return mix(color, pole, 1)
 }
 
 /** Recede toward the background pole (opposite of `readableOn`). */

@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process'
+
 import { describe, expect, it } from 'vitest'
 
 import { contrastRatio, ensureContrast, mix, parseColor, readableOn, relativeLuminance, toHex } from './color'
@@ -78,5 +80,31 @@ describe('contrast', () => {
   it('ensureContrast leaves passing and unparseable colors byte-identical', () => {
     expect(ensureContrast('#3D2F13', '#ffffff', 3.9)).toBe('#3D2F13')
     expect(ensureContrast('ansi256(245)', '#ffffff', 3.9)).toBe('ansi256(245)')
+  })
+
+  it('ensureContrast terminates and normalizes invalid or extreme steps', () => {
+    const moduleUrl = new URL('./color.ts', import.meta.url).href
+    const probe = `
+      import { ensureContrast } from ${JSON.stringify(moduleUrl)}
+      const expected = ensureContrast('#777777', '#ffffff', 4.5)
+      const invalid = [0, -0.1, Number.NaN, Number.POSITIVE_INFINITY]
+      console.log(JSON.stringify({
+        invalid: invalid.map(step => ensureContrast('#777777', '#ffffff', 4.5, step) === expected),
+        tiny: ensureContrast('#777777', '#ffffff', 4.5, Number.MIN_VALUE),
+        oversized: ensureContrast('#777777', '#ffffff', 4.5, 2)
+      }))
+    `
+    const result = spawnSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '--eval', probe], {
+      encoding: 'utf8',
+      timeout: 2000
+    })
+
+    expect(result.error).toBeUndefined()
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      invalid: [true, true, true, true],
+      oversized: '#000000',
+      tiny: '#000000'
+    })
   })
 })
