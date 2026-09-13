@@ -5,6 +5,8 @@ Split out of ``hermes_cli/update_cmd.py``; every name is re-imported there so
 imported lazily inside each function (no import cycle; test patches stay effective).
 """
 
+import hashlib
+import json
 import logging
 from contextlib import suppress
 import os
@@ -25,6 +27,7 @@ logger = logging.getLogger("hermes_cli.update_cmd")
 # The existing ``.update-incomplete`` / ``.lazy-refresh-incomplete`` markers gate dependency/venv repair;
 # this one is the fleet-restart obligation after a git pull that advanced HEAD (#95294).
 _FLEET_RESTART_PENDING_NAME = "fleet_restart_pending"
+_FLEET_RESTART_COMPLETED_NAME = "fleet_restart_completed.json"
 
 _FRESH_RESTART_SUPERVISORS = frozenset({"systemd", "launchd", "service", "s6"})
 
@@ -65,6 +68,143 @@ def _clear_fleet_restart_pending_marker() -> None:
     """Remove the pull→restart obligation breadcrumb. Never raises."""
     from hermes_cli.update_cmd import _m
     _m()._clear_marker_file(_fleet_restart_pending_marker_path(), label="fleet-restart-pending")
+
+
+def _parse_fleet_restart_marker(body: bytes) -> dict | None:
+    """Validated restart obligation fields, or ``None`` for a legacy/malformed marker."""
+    try:
+        fields = dict(line.split("=", 1) for line in body.decode("utf-8").splitlines() if "=" in line)
+        started = float(fields["started"])
+        pid = int(fields["pid"])
+        expected_sha = fields["expected_sha"].strip()
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError):
+        return None
+    if started <= 0 or pid <= 0 or not expected_sha:
+        return None
+    return {"started": started, "pid": pid, "expected_sha": expected_sha}
+
+
+def _fleet_restart_completion_path() -> Path:
+    from hermes_cli.update_receipt import _receipt_dir
+
+    return _receipt_dir() / _FLEET_RESTART_COMPLETED_NAME
+
+
+def _marker_completion_matches(marker_body: bytes) -> bool:
+    try:
+        completed = json.loads(_fleet_restart_completion_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return completed.get("marker_sha256") == hashlib.sha256(marker_body).hexdigest()
+
+
+def _matching_marker_receipt(marker: dict) -> tuple[dict, Path] | None:
+    """Newest receipt from the updater process that reached the marker's target SHA."""
+    from hermes_cli.update_receipt import _receipt_dir
+
+    directory = _receipt_dir()
+    try:
+        paths = sorted(directory.glob("update_*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        latest = directory / "latest.json"
+        if latest.is_file():
+            paths.insert(0, latest)
+    except OSError:
+        return None
+    for path in paths:
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            post_update = receipt.get("post_update") or {}
+            if int(receipt.get("pid", 0)) == marker["pid"] and post_update.get("sha") == marker["expected_sha"]:
+                return receipt, path
+        except (OSError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _sha_includes(loaded_sha: object, expected_sha: str) -> bool:
+    loaded = str(loaded_sha or "")
+    if not loaded:
+        return False
+    if loaded == expected_sha:
+        return True
+    from hermes_cli.update_cmd import _m
+
+    try:
+        return subprocess.run(
+            ["git", "merge-base", "--is-ancestor", expected_sha, loaded],
+            cwd=_m().PROJECT_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _marker_obligation_is_fulfilled(marker: dict, receipt: dict) -> bool:
+    """Prove every gateway owed by *receipt* was replaced after *marker*."""
+    from hermes_cli.update_receipt import _profile_homes, _socket_identity
+
+    runtimes = (receipt.get("plan") or {}).get("runtimes") or []
+    owed: dict[str, int] = {}
+    for runtime in runtimes:
+        if not isinstance(runtime, dict) or runtime.get("kind") != "gateway":
+            return False
+        profile = runtime.get("profile")
+        try:
+            old_pid = int(runtime.get("pid"))
+        except (TypeError, ValueError):
+            return False
+        if not profile or profile == "unknown" or old_pid <= 0 or profile in owed:
+            return False
+        owed[str(profile)] = old_pid
+    if not owed:
+        return False
+
+    homes = dict(_profile_homes())
+    for profile, old_pid in owed.items():
+        home = homes.get(profile)
+        socket = _socket_identity(home) if home is not None else None
+        if socket is None:
+            return False
+        successor_pid, identity = socket
+        if successor_pid == old_pid or not _sha_includes(identity.get("code_sha"), marker["expected_sha"]):
+            return False
+        try:
+            import psutil
+
+            if psutil.Process(successor_pid).create_time() <= marker["started"]:
+                return False
+            psutil.Process(old_pid)
+        except psutil.NoSuchProcess:
+            continue
+        except Exception:
+            return False
+        return False
+    return True
+
+
+def _record_fleet_restart_completion(marker_body: bytes, marker: dict, receipt_path: Path) -> bool:
+    """Persist proof for this exact marker generation without consuming the marker."""
+    marker_path = _fleet_restart_pending_marker_path()
+    completion_path = _fleet_restart_completion_path()
+    try:
+        if marker_path.read_bytes() != marker_body:
+            return False
+        completion_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "marker_sha256": hashlib.sha256(marker_body).hexdigest(),
+            "expected_sha": marker["expected_sha"],
+            "updater_pid": marker["pid"],
+            "source_receipt": receipt_path.name,
+            "completed_at": _time.time(),
+        }
+        tmp = completion_path.with_suffix(completion_path.suffix + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, completion_path)
+        return marker_path.read_bytes() == marker_body
+    except OSError:
+        return False
 
 
 def _current_checkout_sha() -> str | None:
@@ -187,11 +327,29 @@ def _pending_fleet_restart_needed() -> bool:
     """Reconcile old restart obligations against current, identity-matched gateways."""
     from hermes_cli.update_cmd import _current_checkout_sha
 
-    # The marker has no runtime inventory and may belong to a newer, killed update
-    # than latest.json. An older receipt cannot discharge that unknown obligation.
-    with suppress(OSError):
-        if _fleet_restart_pending_marker_path().is_file():
+    marker_path = _fleet_restart_pending_marker_path()
+    try:
+        marker_body = marker_path.read_bytes()
+    except FileNotFoundError:
+        marker_body = None
+    except OSError:
+        return True
+    if marker_body is not None:
+        marker = _parse_fleet_restart_marker(marker_body)
+        if marker is None:
             return True
+        if _marker_completion_matches(marker_body):
+            try:
+                return marker_path.read_bytes() != marker_body
+            except OSError:
+                return True
+        matched = _matching_marker_receipt(marker)
+        if matched is None:
+            return True
+        receipt, receipt_path = matched
+        if not _marker_obligation_is_fulfilled(marker, receipt):
+            return True
+        return not _record_fleet_restart_completion(marker_body, marker, receipt_path)
     if not _receipt_reports_stale_runtime():
         return False
     return not _live_fleet_covers_receipt(_current_checkout_sha())
@@ -200,7 +358,7 @@ def _pending_fleet_restart_needed() -> bool:
 def _warn_pending_fleet_restart(*, startup: bool = False) -> None:
     """Print the specific interrupted-update fleet-restart warning."""
     stream = sys.stderr if startup else sys.stdout
-    print("⚠ A previous `hermes update` pulled new code but did not restart running gateways.", file=stream)
+    print("⚠ A previous `hermes update` left an unverified fleet-restart obligation.", file=stream)
     print("  Gateways may still be serving pre-update modules (mixed sys.modules).", file=stream)
     if startup:
         print("  Run `hermes update` or `hermes gateway restart`.", file=stream)

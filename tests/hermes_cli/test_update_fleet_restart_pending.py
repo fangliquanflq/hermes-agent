@@ -17,8 +17,13 @@ No live gateway, no network. Git and restart are mocked.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from hermes_cli import main as hermes_main
@@ -180,6 +185,69 @@ def test_pending_needed_when_marker_exists():
     assert update_cmd._pending_fleet_restart_needed() is True
     update_cmd._clear_fleet_restart_pending_marker()
     assert update_cmd._pending_fleet_restart_needed() is False
+
+
+def test_verified_successor_fulfills_exact_marker_generation(monkeypatch):
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True
+    ).strip()
+    started = psutil.Process().create_time() - 1
+    marker = update_cmd._fleet_restart_pending_marker_path()
+    marker.write_text(f"started={started}\npid=99999999\nexpected_sha={sha}\n", encoding="utf-8")
+    original = marker.read_bytes()
+    receipt_dir = get_hermes_home() / "logs" / "update_receipts"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "latest.json").write_text(json.dumps({
+        "pid": 99999999,
+        "post_update": {"sha": sha},
+        "plan": {"runtimes": [
+            {"kind": "gateway", "profile": "default", "pid": 99999998}
+        ]},
+    }), encoding="utf-8")
+    monkeypatch.setattr("hermes_cli.update_receipt._profile_homes", lambda: [("default", get_hermes_home())])
+    monkeypatch.setattr(
+        "hermes_cli.update_receipt._socket_identity",
+        lambda _home: (os.getpid(), {"profile": "default", "code_sha": sha}),
+    )
+
+    assert update_cmd._pending_fleet_restart_needed() is False
+    assert marker.read_bytes() == original
+    completed = json.loads(update_cmd_fleet._fleet_restart_completion_path().read_text(encoding="utf-8"))
+    assert completed["expected_sha"] == sha
+
+    marker.write_text(f"started={started + 1}\npid=99999997\nexpected_sha={sha}\n", encoding="utf-8")
+    assert update_cmd._pending_fleet_restart_needed() is True
+
+
+def test_live_old_generation_prevents_successor_from_fulfilling_marker(monkeypatch):
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True
+    ).strip()
+    marker = update_cmd._fleet_restart_pending_marker_path()
+    marker.write_text(
+        f"started={psutil.Process().create_time() - 1}\npid=99999999\nexpected_sha={sha}\n",
+        encoding="utf-8",
+    )
+    receipt_dir = get_hermes_home() / "logs" / "update_receipts"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "latest.json").write_text(json.dumps({
+        "pid": 99999999,
+        "post_update": {"sha": sha},
+        "plan": {"runtimes": [
+            {"kind": "gateway", "profile": "default", "pid": os.getpid()}
+        ]},
+    }), encoding="utf-8")
+    successor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        monkeypatch.setattr("hermes_cli.update_receipt._profile_homes", lambda: [("default", get_hermes_home())])
+        monkeypatch.setattr(
+            "hermes_cli.update_receipt._socket_identity",
+            lambda _home: (successor.pid, {"profile": "default", "code_sha": sha}),
+        )
+        assert update_cmd._pending_fleet_restart_needed() is True
+    finally:
+        successor.terminate()
+        successor.wait(timeout=10)
 
 
 def test_pending_needed_when_unfinished_receipt_runtime_sha_skews(monkeypatch):
@@ -517,7 +585,7 @@ def test_already_up_to_date_runs_pending_restart_when_marker_present(
     assert seen["ran"] is True
     assert not update_cmd._fleet_restart_pending_marker_path().exists()
     out = capsys.readouterr().out
-    assert "did not restart running gateways" in out
+    assert "unverified fleet-restart obligation" in out
 
 
 def test_already_up_to_date_runs_pending_restart_when_receipt_skewed(
@@ -569,7 +637,7 @@ def test_already_up_to_date_runs_pending_restart_when_receipt_skewed(
 
     assert seen["ran"] is True
     out = capsys.readouterr().out
-    assert "did not restart running gateways" in out
+    assert "unverified fleet-restart obligation" in out
 
 
 def test_already_up_to_date_skips_restart_when_nothing_pending(
@@ -593,14 +661,14 @@ def test_already_up_to_date_skips_restart_when_nothing_pending(
     hermes_main.cmd_update(args)
 
     assert seen["ran"] is False
-    assert "did not restart running gateways" not in capsys.readouterr().out
+    assert "unverified fleet-restart obligation" not in capsys.readouterr().out
 
 
 def test_startup_warn_prints_when_marker_present(capsys):
     update_cmd._write_fleet_restart_pending_marker()
     update_cmd._warn_pending_fleet_restart_on_startup()
     err = capsys.readouterr().err
-    assert "did not restart running gateways" in err
+    assert "unverified fleet-restart obligation" in err
     assert "hermes gateway restart" in err
 
 
