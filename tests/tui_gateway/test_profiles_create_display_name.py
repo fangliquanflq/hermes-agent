@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hermes_cli.profiles as profiles
 import tui_gateway.server as srv
+from hermes_cli.web_routers.profiles import _profile_to_dict
 
 
 def test_profiles_create_persists_display_name_and_lists_canonical_id(tmp_path, monkeypatch):
@@ -25,6 +26,14 @@ def test_profiles_create_persists_display_name_and_lists_canonical_id(tmp_path, 
     )["result"]
     rows = srv._methods["profiles.list"]("list", {"include_sessions": False})["result"]["profiles"]
     row = next(item for item in rows if item["name"] == "weather-man")
+    srv._methods["profiles.configure"](
+        "configure",
+        {"name": "weather-man", "ui_meta": {"hermes-bots": {"title": "Weather Bot"}}},
+    )
+    info = next(item for item in profiles.list_profiles() if item.name == "weather-man")
+    rest_row = _profile_to_dict(info)
 
     assert created["name"] == "weather-man"
     assert row["display_name"] == "Weather"
+    assert rest_row["name"] == "weather-man"
+    assert rest_row["ui_meta"]["hermes-bots"]["title"] == "Weather Bot"
