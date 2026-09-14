@@ -19,12 +19,14 @@ does not restart the messaging gateway itself.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from hermes_cli import gateway as hermes_gateway
 from hermes_cli import gateway_windows
 from hermes_cli import main as cli_main
 import hermes_cli.main_install_repair as main_install_repair
 from hermes_cli import process_identity
+from hermes_cli import profiles as profiles_mod
 from hermes_cli import update_cmd
 import hermes_cli.update_cmd_windows as update_cmd_windows
 
@@ -170,14 +172,13 @@ def test_attested_dead_gateway_survives_desktop_ownership_and_marker_is_consumed
 
     token = update_cmd._pause_windows_gateways_for_update()
 
-    generation = token.pop("attested_generation")
+    generation = token.pop("cold_start_profiles")["default"]
     assert generation == json.loads(marker.read_text(encoding="utf-8"))["generation"]
     assert token == {
         "resume_needed": True,
         "profiles": {},
         "unmapped_pids": [],
         "unmapped": [],
-        "cold_start_if_installed": True,
     }
     token["attested_generation"] = generation
     assert marker.exists()  # plan-time probe is read-only
@@ -215,7 +216,7 @@ def test_cold_start_is_authorized_by_the_token_generation_not_the_mutable_marker
     gateway_windows._write_start_attestation([555], "direct spawn (PID 555)")
     marker = tmp_path / "state" / "gateway.start-attestation.json"
     token = update_cmd._pause_windows_gateways_for_update()
-    assert token["attested_generation"]
+    assert token["cold_start_profiles"]["default"]
 
     # Concurrent ``hermes gateway status`` consumed the marker...
     assert gateway_windows.check_start_attestation(current_pids=[]) is not None
@@ -223,13 +224,102 @@ def test_cold_start_is_authorized_by_the_token_generation_not_the_mutable_marker
     # ...and a concurrent ``hermes gateway start`` wrote a fresh one for its own PID.
     gateway_windows._write_start_attestation([777], "direct spawn (PID 777)")
     newer = json.loads(marker.read_text(encoding="utf-8"))["generation"]
-    assert newer != token["attested_generation"]
+    generation = token["cold_start_profiles"]["default"]
+    assert newer != generation
 
     spawned = []
     monkeypatch.setattr(gateway_windows, "_spawn_detached", lambda: spawned.append(1) or 4242)
     monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", lambda *a, **k: [4242])
     monkeypatch.setattr(gateway_windows, "_write_start_attestation", lambda *a, **k: None)
 
-    assert update_cmd._cold_start_windows_gateway_after_update(token) is True
+    assert update_cmd._cold_start_windows_gateway_after_update({"attested_generation": generation}) is True
     assert spawned == [1]  # authorized by the token, not by the (consumed) marker
     assert json.loads(marker.read_text(encoding="utf-8"))["generation"] == newer  # not ours to consume
+
+
+def test_dead_default_profile_is_cold_started_while_beta_is_relaunched(
+    monkeypatch, tmp_path
+):
+    default_home = tmp_path / "default"
+    beta_home = default_home / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    beta = SimpleNamespace(profile="beta", path=beta_home, pid=202)
+    monkeypatch.setattr(cli_main, "_is_windows", lambda: True)
+    monkeypatch.setattr(main_install_repair, "_is_windows", lambda: True)
+    monkeypatch.setattr(hermes_gateway, "find_gateway_pids", lambda **_k: [202])
+    monkeypatch.setattr(hermes_gateway, "find_profile_gateway_processes", lambda **_k: [beta])
+    monkeypatch.setattr(hermes_gateway, "find_windows_gateway_services", lambda **_k: [])
+    monkeypatch.setattr(hermes_gateway, "_get_restart_drain_timeout", lambda: 0.1)
+    monkeypatch.setattr(profiles_mod, "profiles_to_serve", lambda **_k: [
+        ("default", default_home), ("beta", beta_home),
+    ])
+    monkeypatch.setattr(update_cmd, "_desktop_owns_gateway_lifecycle", lambda: True)
+    monkeypatch.setattr(cli_main, "_venv_launcher_ancestors", lambda _pids: [])
+    monkeypatch.setattr(cli_main, "_wait_for_windows_update_gateway_exit", lambda *_a, **_k: set())
+    monkeypatch.setattr(
+        gateway_windows, "attested_death_generation",
+        lambda current_pids, home=None: "default-generation" if home == default_home else None,
+    )
+
+    token = update_cmd._pause_windows_gateways_for_update()
+
+    assert token["profiles"] == {"beta": 202}
+    assert token["cold_start_profiles"] == {"default": "default-generation"}
+
+    events = []
+    monkeypatch.setattr(cli_main, "_refresh_windows_gateway_launchers", lambda: None)
+    monkeypatch.setattr(
+        gateway_windows, "_spawn_detached",
+        lambda **kwargs: events.append(("cold-start", kwargs)) or 303,
+    )
+    monkeypatch.setattr(
+        gateway_windows, "_wait_for_gateway_ready",
+        lambda **kwargs: events.append(("ready", kwargs)) or [303],
+    )
+    monkeypatch.setattr(
+        gateway_windows, "_consume_start_attestation",
+        lambda generation, home=None: events.append(("consume", generation, home)),
+    )
+    monkeypatch.setattr(gateway_windows, "_write_start_attestation", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        update_cmd_windows, "_relaunch_paused_gateways",
+        lambda *_a: events.append(("relaunch", "beta")) or (["beta"], 0),
+    )
+    monkeypatch.setattr(update_cmd_windows, "_verify_relaunched_gateways_alive", lambda *_a: None)
+
+    update_cmd._resume_windows_gateways_after_update(token)
+
+    assert events[0] == ("cold-start", {"profile": "default", "home": default_home})
+    assert ("ready", {"home": default_home}) in events
+    assert ("consume", "default-generation", default_home) in events
+    assert events.index(("relaunch", "beta")) > events.index(("consume", "default-generation", default_home))
+    assert token["cold_start_profiles"] == {}
+    assert token["relaunched_profiles"] == ["default", "beta"]
+    assert token["resume_needed"] is False
+
+
+def test_running_profile_does_not_create_unattested_cold_start_obligations(
+    monkeypatch, tmp_path
+):
+    default_home = tmp_path / "default"
+    beta_home = default_home / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    beta = SimpleNamespace(profile="beta", path=beta_home, pid=202)
+    monkeypatch.setattr(cli_main, "_is_windows", lambda: True)
+    monkeypatch.setattr(main_install_repair, "_is_windows", lambda: True)
+    monkeypatch.setattr(hermes_gateway, "find_gateway_pids", lambda **_k: [202])
+    monkeypatch.setattr(hermes_gateway, "find_profile_gateway_processes", lambda **_k: [beta])
+    monkeypatch.setattr(hermes_gateway, "find_windows_gateway_services", lambda **_k: [])
+    monkeypatch.setattr(hermes_gateway, "_get_restart_drain_timeout", lambda: 0.1)
+    monkeypatch.setattr(profiles_mod, "profiles_to_serve", lambda **_k: [
+        ("default", default_home), ("beta", beta_home),
+    ])
+    monkeypatch.setattr(update_cmd, "_desktop_owns_gateway_lifecycle", lambda: True)
+    monkeypatch.setattr(cli_main, "_venv_launcher_ancestors", lambda _pids: [])
+    monkeypatch.setattr(cli_main, "_wait_for_windows_update_gateway_exit", lambda *_a, **_k: set())
+    monkeypatch.setattr(gateway_windows, "attested_death_generation", lambda **_k: None)
+
+    token = update_cmd._pause_windows_gateways_for_update()
+
+    assert token["profiles"] == {"beta": 202}
+    assert "cold_start_profiles" not in token
