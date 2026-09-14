@@ -44,6 +44,23 @@ const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : und
 const answerValue = (request: ScopedServerRequest, result: unknown) =>
   request.respond({ value: result ? JSON.stringify(result) : '' })
 
+/** Run one preview action for both the current server-request protocol and the
+ * legacy event bridge used by older remote backends. */
+export const runPreviewAction = (p: Record<string, unknown>) =>
+  loadPreviewEngine().then(run =>
+    run({
+      amount: p.amount as never,
+      key: p.key as never,
+      kind: (str(p.action) || '') as never,
+      max: p.max as never,
+      ref: p.ref as never,
+      selector: p.selector as never,
+      submit: p.submit as never,
+      text: p.text as never,
+      to: p.to as PreviewActAction['to']
+    })
+  )
+
 export interface ServerRequestContext {
   deps: Pick<GatewayEventDeps, 'activeSessionIdRef' | 'sessionInterrupted' | 'updateSessionState' | 'upsertToolCall'>
   request: ScopedServerRequest
@@ -291,20 +308,7 @@ const previewAct: Handler = ({ isActiveSession, request, sessionId }) => {
     return
   }
 
-  void loadPreviewEngine()
-    .then(run =>
-      run({
-        amount: p.amount as never,
-        key: p.key as never,
-        kind: (str(p.action) || '') as never,
-        max: p.max as never,
-        ref: p.ref as never,
-        selector: p.selector as never,
-        submit: p.submit as never,
-        text: p.text as never,
-        to: p.to as PreviewActAction['to']
-      })
-    )
+  void runPreviewAction(p)
     .then(
       result => answerValue(request, result),
       error => answerValue(request, { error: error instanceof Error ? error.message : String(error), success: false })

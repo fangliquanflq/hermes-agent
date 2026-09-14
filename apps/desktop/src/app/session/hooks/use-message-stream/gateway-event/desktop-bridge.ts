@@ -2,16 +2,52 @@ import { writeAgentTerminalChunk } from '@/app/right-sidebar/terminal/agent-term
 import { closeAgentTerminalByProc } from '@/app/right-sidebar/terminal/terminals'
 import { applyDesktopLayoutPreset, revealDesktopPane } from '@/store/pane-focus'
 import { recordAgentReaction } from '@/store/reactions-local'
+import { requestGatewayForAgent } from '@/store/gateway'
 import { setMessages } from '@/store/session'
 import { $tipsEnabled, type ActiveTip, showTip } from '@/store/tips'
 
+import { runPreviewAction } from './server-requests'
 import type { GatewayEventContext } from './types'
 
 /** Desktop-surface bridge events: agent terminal streaming, tips, pane
  *  reveal, layouts and message reactions. The read-back REQUESTS the agent
  *  blocks on (terminal/preview/window/tour) live in `server-requests.ts`. */
 export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
-  const { event, payload, isActiveEvent } = ctx
+  const { event, payload, explicitSid, isActiveEvent } = ctx
+
+  // Compatibility for a newer Desktop attached to a pre-server-request remote
+  // backend. Those backends still emit preview.act.request and wait for the
+  // paired preview.act.respond RPC. Keep #107498's ownership rule: another
+  // window showing a different explicitly scoped session must stay silent so
+  // the active window's real result can win.
+  if ((event.type as string) === 'preview.act.request') {
+    const requestId = typeof payload?.request_id === 'string' ? payload.request_id : ''
+
+    if (!requestId || (explicitSid && !isActiveEvent)) {
+      return true
+    }
+
+    const answer = (result: unknown) =>
+      requestGatewayForAgent(event.connectionId ?? null, event.profile ?? 'default', 'preview.act.respond', {
+        request_id: requestId,
+        text: result ? JSON.stringify(result) : ''
+      }).catch(() => undefined)
+
+    if (!isActiveEvent) {
+      void answer({
+        error: 'The in-app browser only takes actions in the session the user is looking at.',
+        success: false
+      })
+
+      return true
+    }
+
+    void runPreviewAction(payload ?? {}).then(answer, error =>
+      answer({ error: error instanceof Error ? error.message : String(error), success: false })
+    )
+
+    return true
+  }
 
   if (event.type === 'agent.terminal.output') {
     // Live chunk from a background process → its read-only agent terminal tab.
