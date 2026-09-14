@@ -613,6 +613,8 @@ def test_notifier_delivers_block_loop_detected_triage_ping(tmp_path, monkeypatch
     assert len(adapter.sent) == 1, "block_loop_detected must produce a notification"
     text = adapter.sent[0]["text"]
     assert "TRIAGE" in text
+    assert "orchestration attention" in text
+    assert "human decision" not in text
     assert tid in text
     assert "needs credentials" in text
     # Cursor advanced: the event is claimed and not re-delivered.
@@ -696,7 +698,7 @@ def test_review_requested_wakes_the_origin_session(tmp_path, monkeypatch):
 
 
 def test_block_loop_detected_wakes_the_origin_session(tmp_path, monkeypatch):
-    """A triage escalation wakes the origin so a decision gets made."""
+    """A triage escalation wakes the origin without asserting owner intent."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "triage-wake.db"))
     kb.init_db()
 
@@ -729,7 +731,10 @@ def test_block_loop_detected_wakes_the_origin_session(tmp_path, monkeypatch):
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     assert len(adapter.sent) == 1
-    assert tid in _wake_text(adapter)
+    wake = _wake_text(adapter)
+    assert tid in wake
+    assert "orchestration attention" in wake
+    assert "needs a decision" not in wake
 
 
 def test_review_requested_does_not_wake_a_notify_only_subscription(
