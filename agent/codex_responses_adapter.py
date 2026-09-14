@@ -414,6 +414,56 @@ def _tool_output_items(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [{"type": "function_call_output", "call_id": _clamp_responses_call_id(call_id), "output": output_value}]
 
 
+def _dedupe_duplicate_tool_pairs(
+    items: List[Dict[str, Any]], item_sources: List[Optional[Dict[str, Any]]],
+) -> tuple[List[Dict[str, Any]], List[Optional[Dict[str, Any]]]]:
+    """Keep only the newest replayed tool pair for each reused ``call_id``.
+
+    Chat transports tolerate ids such as ``terminal:0`` being reused after the
+    prior call is answered. Responses validators instead require a call id to
+    identify exactly one call and output across the entire input. Deduplicate
+    only the converted wire copy, leaving durable history untouched.
+    """
+    last_call: Dict[str, int] = {}
+    last_output: Dict[str, int] = {}
+    call_counts: Dict[str, int] = {}
+    output_counts: Dict[str, int] = {}
+    for index, item in enumerate(items):
+        call_id = item.get("call_id")
+        if not _nonblank(call_id):
+            continue
+        if item.get("type") == "function_call":
+            last_call[call_id] = index
+            call_counts[call_id] = call_counts.get(call_id, 0) + 1
+        elif item.get("type") == "function_call_output":
+            last_output[call_id] = index
+            output_counts[call_id] = output_counts.get(call_id, 0) + 1
+
+    duplicate_ids = {
+        call_id for call_id in last_call.keys() | last_output.keys()
+        if call_counts.get(call_id, 0) > 1 or output_counts.get(call_id, 0) > 1
+    }
+    if not duplicate_ids:
+        return items, item_sources
+
+    dropped = {
+        index
+        for index, item in enumerate(items)
+        if item.get("call_id") in duplicate_ids and (
+            (item.get("type") == "function_call" and index != last_call[item["call_id"]])
+            or (item.get("type") == "function_call_output" and index != last_output[item["call_id"]])
+        )
+    }
+    logger.debug(
+        "Responses adapter: dropped %d duplicate tool item(s) for %d reused call_id(s)",
+        len(dropped), len(duplicate_ids),
+    )
+    return (
+        [item for index, item in enumerate(items) if index not in dropped],
+        [source for index, source in enumerate(item_sources) if index not in dropped],
+    )
+
+
 def _chat_messages_to_responses_input(
     messages: List[Dict[str, Any]], *, is_xai_responses: bool = False, is_github_responses: bool = False,
     replay_encrypted_reasoning: bool = True, current_issuer_kind: Optional[str] = None,
@@ -512,6 +562,7 @@ def _chat_messages_to_responses_input(
     # before the merge rewrote its content. Pruning reads the source message's own up-to-date,
     # provenance-tagged content directly instead of trying to recover it from whatever shape the conversion
     # produced (#90976).
+    items, item_sources = _dedupe_duplicate_tool_pairs(items, item_sources)
     if not native_compaction_eligible:
         return items
     from agent.native_compaction import prune_pre_checkpoint_items

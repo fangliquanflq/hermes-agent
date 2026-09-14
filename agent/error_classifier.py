@@ -188,6 +188,8 @@ _MULTIMODAL_TOOL_CONTENT_PATTERNS = (
     "tool message must be a string", "expected string, got list", "expected string, got array",
     # Console Go / pydantic-v2 relays behind opencode-go (422, param ``messages.N.tool.content.str``, #104731).
     "tool_call.content must be string", "tool.content.str", "input should be a valid string",
+    # NVIDIA NIM's Rust gateway names this enum when list-type tool content fails deserialization (#111231).
+    "chatcompletionrequesttoolmessagecontent",
 )
 
 # Local-inference memory/resource-ceiling rejections (oMLX/MLX memory guard,

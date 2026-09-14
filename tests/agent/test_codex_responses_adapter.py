@@ -378,6 +378,32 @@ def test_chat_messages_to_responses_input_keeps_short_call_id():
     assert output["call_id"] == "call_abc123"
 
 
+@pytest.mark.parametrize("native_compaction_eligible", [False, True])
+def test_chat_messages_to_responses_input_keeps_newest_pair_for_reused_call_id(native_compaction_eligible):
+    messages = []
+    for turn in ("old", "new"):
+        messages.extend([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "call_id": "terminal:0",
+                    "function": {"name": "terminal", "arguments": f'{{"turn":"{turn}"}}'},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "terminal:0", "content": f"{turn} result"},
+        ])
+
+    items = _chat_messages_to_responses_input(
+        messages, native_compaction_eligible=native_compaction_eligible,
+    )
+
+    calls = [item for item in items if item.get("type") == "function_call"]
+    outputs = [item for item in items if item.get("type") == "function_call_output"]
+    assert [call["arguments"] for call in calls] == ['{"turn":"new"}']
+    assert [output["output"] for output in outputs] == ["new result"]
+
+
 def test_sanitize_replayed_fn_name_valid_passthrough():
     """Valid names pass through unchanged (identity — cache-prefix safe)."""
     for name in ("web_search", "exec-command", "a1_B2-c3", "x" * 64):
