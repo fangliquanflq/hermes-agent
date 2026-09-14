@@ -2167,6 +2167,57 @@ class TestIncomingAudioHandling:
 
 class TestMessageRouting:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "subtype",
+        [
+            "channel_join",
+            "channel_leave",
+            "channel_topic",
+            "channel_purpose",
+            "channel_name",
+            "channel_convert_to_private",
+            "channel_convert_to_public",
+            "pinned_item",
+            "unpinned_item",
+            "file_comment",
+            "file_mention",
+        ],
+    )
+    async def test_system_message_subtypes_are_filtered(self, adapter, subtype):
+        event = {
+            "type": "message",
+            "subtype": subtype,
+            "text": "Slack housekeeping",
+            "user": "U_USER",
+            "client_msg_id": f"client-{subtype}",
+            "channel": "C123",
+            "team": "T123",
+            "ts": f"system-{subtype}",
+        }
+
+        assert await adapter._prefilter_inbound(event, None) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("subtype", [None, "file_share", "thread_broadcast", "me_message"])
+    async def test_human_message_subtypes_reach_routing(self, adapter, subtype):
+        event = {
+            "type": "message",
+            "text": "Human-authored message",
+            "user": "U_USER",
+            "client_msg_id": f"client-{subtype}",
+            "channel": "C123",
+            "team": "T123",
+            "ts": f"human-{subtype}",
+        }
+        if subtype is not None:
+            event["subtype"] = subtype
+
+        accepted = await adapter._prefilter_inbound(event, None)
+
+        assert accepted is not None
+        assert accepted[0] is event
+
+    @pytest.mark.asyncio
     async def test_dm_processed_without_mention(self, adapter):
         """DM messages should be processed without requiring a bot mention."""
         event = {
