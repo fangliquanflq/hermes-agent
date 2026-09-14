@@ -85,6 +85,9 @@ class TestSupportsMediaInToolResults:
     def test_openrouter_yes(self):
         assert _supports_media_in_tool_results("openrouter", "anthropic/claude-opus-4.6") is True
 
+    def test_openrouter_honors_routed_provider_veto(self):
+        assert _supports_media_in_tool_results("openrouter", "xiaomi/mimo-v2.5") is False
+
 
     def test_empty_provider_no(self):
         assert _supports_media_in_tool_results("", "anything") is False

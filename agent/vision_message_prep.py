@@ -143,13 +143,17 @@ class VisionMessagePrepMixin:
             return False
 
     def _provider_supports_vision_tool_messages(self) -> bool:
-        """True if the active provider accepts list-type tool content (some, e.g. Xiaomi MiMo, take
-        multimodal user messages but 400 on list-type tool content; profile ``supports_vision_tool_messages``)."""
+        """True when both transport and routed backend accept list-type tool content."""
         try:
-            from providers import get_provider_profile
-            profile = get_provider_profile((getattr(self, "provider", "") or "").strip())
-            if profile is not None:
-                return getattr(profile, "supports_vision_tool_messages", True)
+            from providers import get_provider_profiles_for_model
+            profiles = get_provider_profiles_for_model(
+                getattr(self, "provider", ""), getattr(self, "model", "")
+            )
+            if profiles:
+                return all(
+                    getattr(profile, "supports_vision_tool_messages", True)
+                    for profile in profiles
+                )
         except Exception:
             pass
         return True  # default: assume compatible

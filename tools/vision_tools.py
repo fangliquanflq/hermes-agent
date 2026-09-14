@@ -414,8 +414,8 @@ _TOOL_RESULT_MEDIA_PROVIDERS = frozenset({
 _GEMINI_PROVIDERS = frozenset({"google", "gemini", "google-gemini", "google-vertex-gemini"})
 
 
-def _profile_rejects_tool_media(provider: str) -> bool:
-    """Hard veto: the provider's ``ProviderProfile`` declares
+def _profile_rejects_tool_media(provider: str, model: str = "") -> bool:
+    """Hard veto: the transport or routed model's ``ProviderProfile`` declares
     ``supports_vision_tool_messages=False`` — images are accepted in user
     messages but list-type tool-result content is rejected with 400
     (xiaomi/MiMo "text is not set"). ``supports_vision`` alone must not
@@ -423,9 +423,11 @@ def _profile_rejects_tool_media(provider: str) -> bool:
     and the image never enters context (#89981).
     """
     try:
-        from providers import get_provider_profile
-        profile = get_provider_profile(str(provider or "").strip().lower())
-        return profile is not None and profile.supports_vision_tool_messages is False
+        from providers import get_provider_profiles_for_model
+        return any(
+            profile.supports_vision_tool_messages is False
+            for profile in get_provider_profiles_for_model(provider, model)
+        )
     except Exception:
         return False
 
@@ -435,7 +437,7 @@ def _supports_media_in_tool_results(provider: str, model: str) -> bool:
     providers are False (caller falls back to aux-LLM text) unless their ``ProviderProfile``
     declares ``supports_vision``; ``supports_vision_tool_messages=False`` is a hard veto."""
     p = provider.strip().lower() if isinstance(provider, str) else ""
-    if not p or _profile_rejects_tool_media(p):
+    if not p or _profile_rejects_tool_media(p, model):
         return False
     if p in _TOOL_RESULT_MEDIA_PROVIDERS:
         return True
@@ -466,7 +468,7 @@ def _should_use_native_vision_fast_path() -> bool:
         # The profile veto applies ahead of the capability lookup too: a
         # model marked vision-capable by models.dev / custom_providers must
         # not re-open the multimodal-envelope route the profile rejects.
-        if _profile_rejects_tool_media(provider):
+        if _profile_rejects_tool_media(provider, model):
             return False
         return (
             _supports_media_in_tool_results(provider, model)

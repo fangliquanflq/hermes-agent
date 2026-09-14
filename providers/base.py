@@ -74,6 +74,11 @@ class ProviderProfile:
     # (e.g. Xiaomi MiMo, which returns 400 "text is not set").
     supports_vision_tool_messages: bool = True
 
+    # True when model ids are qualified as ``provider/model`` and the prefix
+    # identifies the backend whose wire quirks also apply. Aggregators such as
+    # OpenRouter use this to compose their own profile with the routed profile.
+    model_ids_are_provider_qualified: bool = False
+
     # True only when this provider's Chat Completions endpoint explicitly
     # documents ``prompt_cache_key`` as an accepted request body field.  This
     # is deliberately opt-in: many OpenAI-compatible endpoints reject unknown

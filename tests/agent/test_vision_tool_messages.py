@@ -67,6 +67,10 @@ class TestProviderSupportsVisionToolMessages:
         agent = _make_agent("xiaomi", "mimo-v2.5")
         assert agent._provider_supports_vision_tool_messages() is False
 
+    def test_openrouter_xiaomi_returns_false(self):
+        agent = _make_agent("openrouter", "xiaomi/mimo-v2.5")
+        assert agent._provider_supports_vision_tool_messages() is False
+
 
 
 

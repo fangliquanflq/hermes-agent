@@ -71,6 +71,7 @@ nous = NousProfile(
     display_name="Nous Research", description="Nous Research — Hermes model family",
     signup_url="https://nousresearch.com/", fallback_models=("hermes-3-405b", "hermes-3-70b"),
     base_url="https://inference-api.nousresearch.com/v1", auth_type="oauth_device_code",
+    model_ids_are_provider_qualified=True,
 )
 
 register_provider(nous)

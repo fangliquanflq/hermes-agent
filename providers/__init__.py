@@ -83,6 +83,27 @@ def get_provider_profile(name: str) -> ProviderProfile | None:
     return profile
 
 
+def get_provider_profiles_for_model(
+    provider: str, model: str
+) -> tuple[ProviderProfile, ...]:
+    """Return transport and routed-backend profiles for an active model.
+
+    Most providers own their model ids directly, so their profile is the only
+    result. Aggregators may declare provider-qualified model ids; for those,
+    a registered ``vendor/model`` prefix contributes the backend's wire quirks.
+    """
+    transport = get_provider_profile(str(provider or "").strip().lower())
+    if transport is None:
+        return ()
+    profiles = [transport]
+    if transport.model_ids_are_provider_qualified:
+        backend_name, separator, _ = str(model or "").strip().lower().partition("/")
+        backend = get_provider_profile(backend_name) if separator else None
+        if backend is not None and backend is not transport:
+            profiles.append(backend)
+    return tuple(profiles)
+
+
 def list_providers() -> list[ProviderProfile]:
     """Return all registered provider profiles (one per canonical name)."""
     global _PROVIDER_LIST_CACHE
