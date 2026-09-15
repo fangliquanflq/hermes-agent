@@ -1141,6 +1141,43 @@ class TestRunJobConfigLogging:
             f"Expected a config.yaml parse warning in logs, got: {[r.message for r in caplog.records]}"
 
 
+class TestCronFreeModelFallback:
+    def test_retired_openrouter_free_model_gets_only_free_fallbacks(self):
+        from cron.scheduler import _cron_fallback_chain
+
+        catalog = [
+            ("minimax/minimax-m3:free", "free"),
+            ("paid/model", "recommended"),
+            ("nvidia/replacement:free", "free"),
+            ("z-ai/another:free", "free"),
+        ]
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=catalog):
+            chain = _cron_fallback_chain(
+                {}, {"provider": "openrouter"}, "minimax/minimax-m3:free"
+            )
+
+        assert chain == [
+            {"provider": "openrouter", "model": "nvidia/replacement:free"},
+            {"provider": "openrouter", "model": "z-ai/another:free"},
+        ]
+
+    def test_configured_fallback_chain_remains_authoritative(self):
+        from cron.scheduler import _cron_fallback_chain
+
+        configured = [{"provider": "anthropic", "model": "claude-haiku-4.5"}]
+        with patch("cron.scheduler.get_fallback_chain", return_value=configured), patch(
+            "hermes_cli.models.fetch_openrouter_models"
+        ) as fetch_catalog:
+            chain = _cron_fallback_chain(
+                {"fallback_providers": configured},
+                {"provider": "openrouter"},
+                "minimax/minimax-m3:free",
+            )
+
+        assert chain is configured
+        fetch_catalog.assert_not_called()
+
+
 class TestRunJobConfigEnvVarExpansion:
     """Verify that ${VAR} references in config.yaml are expanded when running cron jobs."""
 

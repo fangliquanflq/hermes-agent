@@ -2115,6 +2115,45 @@ class _CronAgentSetup:
     credential_pool: Any = None
 
 
+def _cron_fallback_chain(cfg: dict, runtime: dict, model: str) -> Optional[list[dict]]:
+    """Configured fallbacks, or zero-cost alternatives for a retired OpenRouter free slug.
+
+    A cron job pinned to ``:free`` commonly outlives that catalog entry.  Keep explicit fallback
+    policy authoritative; only synthesize candidates when the primary is itself an OpenRouter free
+    model, so unattended recovery can never opt the user into paid inference.
+    """
+    configured = get_fallback_chain(cfg)
+    if configured:
+        return configured
+    if str(runtime.get("provider") or "").strip().lower() != "openrouter":
+        return None
+    primary = str(model or "").strip()
+    if not primary.lower().endswith(":free"):
+        return None
+
+    try:
+        from hermes_cli.models import fetch_openrouter_models
+
+        catalog = fetch_openrouter_models()
+    except Exception:
+        logger.debug("Could not resolve free OpenRouter cron fallbacks", exc_info=True)
+        return None
+
+    candidates = [
+        {"provider": "openrouter", "model": candidate}
+        for candidate, _description in catalog
+        if isinstance(candidate, str)
+        and candidate.lower().endswith(":free")
+        and candidate.lower() != primary.lower()
+    ]
+    if candidates:
+        logger.info(
+            "Cron free-model fallback armed with %d current OpenRouter candidate(s)",
+            len(candidates),
+        )
+    return candidates or None
+
+
 def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _CronAgentSetup:
     """Resolve model/runtime/reasoning/pool for the run, in the original gate order: exfil guard ->
     preflight (may block) -> runtime (+ fallback chain) -> credential pool -> MCP."""
@@ -2141,7 +2180,7 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
     setup.reasoning_config = _resolve_job_reasoning_config(
         job, _cfg if isinstance(_cfg, dict) else {}, str(setup.model)
     )
-    setup.fallback_model = get_fallback_chain(_cfg) or None
+    setup.fallback_model = _cron_fallback_chain(_cfg, setup.runtime, setup.model)
     setup.credential_pool = _load_credential_pool(setup.runtime, job_id)
     # MCP servers must be registered before AIAgent is constructed.
     _init_cron_mcp_tools(job_id)
