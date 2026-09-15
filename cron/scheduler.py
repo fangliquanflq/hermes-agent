@@ -443,6 +443,22 @@ from cron.executions import (
 # Response marker that suppresses delivery (output is still saved locally for audit).
 SILENT_MARKER = "[SILENT]"
 
+# First-line control marker that lets an agent declare a semantic cron failure even when its
+# own turn completed normally (for example, after a delegated child failed).
+CRON_FAILURE_MARKER = "[CRON_FAILURE]"
+
+
+def _cron_failure_marker_error(text: str) -> Optional[str]:
+    """Return the declared failure reason from an exact standalone first-line marker.
+
+    Mid-report mentions and quoted/indented markers remain ordinary output. The caller keeps
+    the original response intact for the saved run document.
+    """
+    lines = (text or "").splitlines()
+    if not lines or lines[0].rstrip() != CRON_FAILURE_MARKER:
+        return None
+    return "\n".join(lines[1:]).strip() or "Cron agent reported failure."
+
 
 def _is_cron_silence_response(text: str) -> bool:
     """True when a cron final response should suppress delivery: ``[SILENT]`` (or SILENT /
@@ -2922,6 +2938,11 @@ def _run_one_job_body(
             _teardown_deferred()
             _record_fire_ownership_lost(job["id"], fire_owner, execution_id)
             return True
+
+        if success and not job.get("no_agent"):
+            marker_error = _cron_failure_marker_error(final_response)
+            if marker_error is not None:
+                success, error = False, marker_error
 
         # Agent is still live through delivery; wrap ALL of save/compose/deliver in try/finally so a
         # raise anywhere still tears the deferred agent down.

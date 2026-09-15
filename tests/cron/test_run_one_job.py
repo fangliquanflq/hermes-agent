@@ -78,6 +78,56 @@ def test_run_one_job_success_sequence(monkeypatch):
     assert calls[-1] == ("mark", "j2", True)
 
 
+@pytest.mark.parametrize(
+    ("final_response", "no_agent", "expected_success", "expected_error"),
+    [
+        ("[CRON_FAILURE]\nchild export failed", False, False, "child export failed"),
+        (
+            "The child mentioned [CRON_FAILURE] while describing its protocol.",
+            False,
+            True,
+            None,
+        ),
+        ("[CRON_FAILURE]\nscript output", True, True, None),
+    ],
+)
+def test_run_one_job_declared_failure_marker(
+    monkeypatch, final_response, no_agent, expected_success, expected_error
+):
+    """Only an agent's exact first-line marker changes a successful run to failure."""
+    marked = []
+    delivered = []
+    monkeypatch.setattr(
+        s, "run_job", lambda *_a, **_kw: (True, "full audit output", final_response, None)
+    )
+    monkeypatch.setattr(s, "save_job_output", lambda *_a, **_kw: "/tmp/output.md")
+    monkeypatch.setattr(
+        s,
+        "_deliver_result",
+        lambda _job, content, **kwargs: delivered.append((content, kwargs)) or None,
+    )
+    monkeypatch.setattr(
+        s,
+        "mark_job_run",
+        lambda *args, **kwargs: marked.append((args, kwargs)),
+    )
+
+    job = {"id": "declared", "name": "delegator"}
+    if no_agent:
+        job["no_agent"] = True
+
+    assert s.run_one_job(job) is expected_success
+    assert marked[0][0][:3] == ("declared", expected_success, expected_error)
+    assert delivered[0][1]["for_failure"] is (not expected_success)
+
+
+def test_cron_prompt_describes_declared_failure_marker():
+    prompt = s._build_job_prompt({"id": "prompt", "name": "delegator", "prompt": "work"})
+
+    assert "put [CRON_FAILURE] on the first line by itself" in prompt
+    assert "then explain the child failure on following lines" in prompt
+
+
 def test_run_one_job_exception_delivers_failure_alert(monkeypatch):
     """An exception escaping the run body must not become a silent error row."""
     delivered = []
