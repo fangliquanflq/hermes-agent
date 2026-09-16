@@ -3183,6 +3183,26 @@ def _requeue_pending_steer(agent, steer_text: str) -> None:
         agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
 
 
+def _persist_steer_boundary(agent, messages: list) -> None:
+    """Commit a delivered steer before a later assistant response can overtake it.
+
+    Tool results are flushed as they complete, but a standalone steer used to wait
+    for the next ordinary flush.  A fast final response could therefore be
+    projected/committed first and leave the steer as the transcript tail.  This is
+    best-effort: the normal finalizer retries any failed persistence write.
+    """
+    if getattr(agent, "_session_db", None) is None:
+        return
+    try:
+        agent._flush_messages_to_session_db(messages)
+    except Exception:
+        _ra().logger.warning(
+            "steer-boundary flush failed (session=%s) — relying on turn finalization retry",
+            getattr(agent, "session_id", None) or "none",
+            exc_info=True,
+        )
+
+
 def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
     """Persist any pending /steer text as a standalone user message.
 
@@ -3196,12 +3216,12 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
     - message-role alternation stays legal — ``assistant(tool_calls) → tool →
       user`` is the documented "user jumped in mid-run" pattern that
       ``repair_message_sequence`` deliberately keeps;
-    - the appended dict carries no ``_DB_PERSISTED_MARKER`` yet, so the next
-      ``_flush_messages_to_session_db`` writes it to the session store — the
-      steer text finally becomes part of the durable transcript instead of
-      being smeared onto an already-persisted tool row that append-only
-      persistence never rewrites (replayed histories then diverge from the
-      live request bytes and break the provider prompt cache).
+    - the appended dict is flushed at this causal boundary, before a later final
+      assistant response can be committed or projected ahead of it.  The steer
+      text therefore becomes part of the durable transcript instead of being
+      smeared onto an already-persisted tool row that append-only persistence
+      never rewrites (replayed histories then diverge from the live request
+      bytes and break the provider prompt cache).
     """
     if num_tool_msgs <= 0 or not messages:
         return
@@ -3218,6 +3238,7 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
         _requeue_pending_steer(agent, steer_text)
         return
     messages.append(steer_user_row(steer_text))
+    _persist_steer_boundary(agent, messages)
     _ra().logger.info(
         "Delivered /steer to agent after tool batch (%d chars) as new user message: %s", len(steer_text),
         steer_text[:120] + ("..." if len(steer_text) > 120 else ""),
@@ -3262,7 +3283,7 @@ __all__ = [
     "plan_cache_sections_for_destination", "anthropic_prompt_cache_policy", "create_openai_client",
     "switch_model", "invoke_tool", "repair_tool_call", "sanitize_api_messages",
     "looks_like_codex_intermediate_ack", "copy_reasoning_content_for_api", "cleanup_dead_connections",
-    "extract_api_error_context", "apply_pending_steer_to_tool_results", "_iter_pool_sockets",
+    "extract_api_error_context", "apply_pending_steer_to_tool_results", "_persist_steer_boundary", "_iter_pool_sockets",
     "force_close_tcp_sockets",
 ]
 

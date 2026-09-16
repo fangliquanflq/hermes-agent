@@ -508,13 +508,20 @@ class TestSteerInjection:
         # And pending_steer is consumed.
         assert agent._pending_steer is None
 
-    def test_appended_user_message_is_persistable(self):
-        """The appended user dict carries no _DB_PERSISTED_MARKER yet, so the
-        next _flush_messages_to_session_db writes it to state.db — the steer
-        text lands in the durable transcript (messages.content, role=user)."""
+    def test_appended_user_message_is_persisted_before_final_response(self):
+        """The steer flush happens at injection, so a later final assistant row
+        cannot be committed ahead of the user correction it consumed."""
         from agent.context_compressor import _DB_PERSISTED_MARKER
 
         agent = _bare_agent()
+        agent._session_db = object()
+        snapshots = []
+
+        def flush(messages, _history=None):
+            snapshots.append([(m.get("role"), m.get("display_kind")) for m in messages])
+            messages[-1][_DB_PERSISTED_MARKER] = True
+
+        agent._flush_messages_to_session_db = flush
         agent.steer("remember this decision")
         messages = [
             {"role": "assistant", "tool_calls": [{"id": "a"}]},
@@ -522,7 +529,12 @@ class TestSteerInjection:
         ]
         agent._apply_pending_steer_to_tool_results(messages, num_tool_msgs=1)
         assert messages[-1]["role"] == "user"
-        assert _DB_PERSISTED_MARKER not in messages[-1]
+        assert messages[-1][_DB_PERSISTED_MARKER] is True
+        assert snapshots == [[("assistant", None), ("tool", None), ("user", "steer")]]
+
+        messages.append({"role": "assistant", "content": "done"})
+        agent._flush_messages_to_session_db(messages)
+        assert snapshots[-1][-2:] == [("user", "steer"), ("assistant", None)]
 
     def test_no_op_when_no_steer_pending(self):
         agent = _bare_agent()
@@ -643,6 +655,11 @@ class TestPreApiCallSteerDrain:
         from agent.turn_iteration_prep import _inject_steer_after_newest_tool_result
 
         agent = _bare_agent()
+        agent._session_db = object()
+        snapshots = []
+        agent._flush_messages_to_session_db = lambda rows, _history=None: snapshots.append(
+            [(row.get("role"), row.get("display_kind")) for row in rows]
+        )
         tool_row = {"role": "tool", "content": "output here", "tool_call_id": "tc1"}
         before = dict(tool_row)
         messages = [
@@ -660,6 +677,7 @@ class TestPreApiCallSteerDrain:
         assert STEER_MARKER_OPEN in messages[-1]["content"]
         assert "focus on error handling" in messages[-1]["content"]
         assert agent._pending_steer is None
+        assert snapshots[-1][-2:] == [("tool", None), ("user", "steer")]
 
     def test_pre_api_drain_restashes_when_no_tool_message(self):
         """If there are no tool results yet (first iteration), the steer
