@@ -84,10 +84,11 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
 
 def _write_sentinel(payload: Dict[str, Any], home: Optional[Path]) -> None:
     try:
+        from hermes_constants import mkdir_under_hermes_home
         from utils import atomic_json_write
 
         path = get_lifecycle_sentinel_path(home)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_under_hermes_home(path.parent)
         atomic_json_write(path, payload, indent=None)
     except Exception:
         logger.debug("Failed to write lifecycle sentinel", exc_info=True)

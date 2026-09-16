@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
-from hermes_constants import secure_parent_dir
+from hermes_constants import mkdir_under_hermes_home, secure_parent_dir
 from utils import atomic_json_write
 from tools.mcp_dashboard_oauth import contextvar_set as _contextvar_set, get_dashboard_oauth_flow
 
@@ -108,7 +108,7 @@ async def acquire_refresh_fence(path: "Path", *, timeout: float = _REFRESH_FENCE
     """
     lock_path = _refresh_lock_path(path)
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_under_hermes_home(lock_path.parent)
         secure_parent_dir(lock_path)
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError as exc:
@@ -386,7 +386,7 @@ def _read_json(path: Path) -> dict | None:
 def _write_json(path: Path, data: dict) -> None:
     """OAuth tokens/client info at 0600 from creation, parent tightened to 0700 (``secure_parent_dir``
     refuses ``/``, top-level dirs and the install tree — #25821, #93050)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_under_hermes_home(path.parent)
     secure_parent_dir(path)
     atomic_json_write(path, data, mode=0o600, default=str)
 
@@ -555,7 +555,7 @@ class HermesTokenStorage:
         the refused client_id. Cleared by ``remove()`` so a fixed document gets a retry."""
         path = self._cimd_rejected_path()
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            mkdir_under_hermes_home(path.parent)
             path.touch()
         except OSError as exc:  # non-fatal — worst case we retry CIMD later
             logger.debug("Could not record CIMD rejection at %s: %s", path, exc)
@@ -589,7 +589,7 @@ class HermesTokenStorage:
         if not snapshot:
             return
         token_dir = _get_token_dir(self._hermes_home)
-        token_dir.mkdir(parents=True, exist_ok=True)
+        mkdir_under_hermes_home(token_dir)
         for fname, data in snapshot.items():
             try:
                 fd = os.open(str(token_dir / fname), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)

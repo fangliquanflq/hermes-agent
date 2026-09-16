@@ -13,6 +13,7 @@ its first turn.
 """
 
 import json
+import shutil
 
 import pytest
 
@@ -184,6 +185,33 @@ def test_unreadable_mirror_degrades_to_unknown(cold_process, offline, monkeypatc
 
     monkeypatch.setattr(models_mod, "_urlopen_model_catalog_request", offline)
     assert models_reasoning_caps.nous_model_reasoning_capabilities("deepseek/deepseek-v4-pro") is None
+
+
+def test_late_save_does_not_recreate_deleted_profile_home(tmp_path, monkeypatch):
+    from hermes_constants import (
+        mark_named_profile_deleted,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    default_home = tmp_path / ".hermes"
+    profile = default_home / "profiles" / "worker"
+    profile.mkdir(parents=True)
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    mark_named_profile_deleted(profile)
+    shutil.rmtree(profile)
+
+    token = set_hermes_home_override(profile)
+    try:
+        models_reasoning_caps._save_reasoning_caps_disk(
+            "https://example.test/v1/models",
+            {"model": {"supports_reasoning": True}},
+        )
+    finally:
+        reset_hermes_home_override(token)
+
+    assert not profile.exists()
 
 
 def test_pricing_fetch_seeds_the_mirror(cold_process, offline, monkeypatch):

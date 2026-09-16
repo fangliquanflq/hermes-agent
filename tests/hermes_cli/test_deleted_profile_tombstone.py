@@ -49,6 +49,20 @@ def _delete(name: str) -> None:
 
 
 class TestDeletedProfileTombstone:
+    def test_atomic_writer_guards_named_profiles_only(self, profile_env):
+        from utils import atomic_json_write
+
+        profile_dir = create_profile("worker", no_alias=True, no_skills=True)
+        _delete("worker")
+
+        with pytest.raises(FileNotFoundError, match="Named profile home does not exist"):
+            atomic_json_write(profile_dir / "cache" / "late.json", {"late": True})
+
+        assert not profile_dir.exists()
+        unrelated = profile_env / "srv" / "profiles" / "buildcache" / "cache.json"
+        atomic_json_write(unrelated, {"ok": True})
+        assert unrelated.is_file()
+
     def test_delete_then_logging_setup_does_not_recreate_home(self, profile_env, monkeypatch):
         profile_dir = create_profile("worker", no_alias=True, no_skills=True)
         with patch("hermes_cli.profiles._cleanup_gateway_service"), patch(
