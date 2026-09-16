@@ -599,9 +599,32 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
     return _snapshot("openrouter", "credits_api", windows, details)
 
 
+def _fetch_opencode_go_account_usage(
+    base_url: Optional[str], api_key: Optional[str],
+) -> Optional[AccountUsageSnapshot]:
+    runtime = resolve_runtime_provider(
+        requested="opencode-go", explicit_base_url=base_url, explicit_api_key=api_key,
+    )
+    token = str(runtime.get("api_key", "") or "").strip()
+    if not token:
+        return None
+    payload = _get_json(
+        "https://opencode.ai/zen/go/v1/usage",
+        {"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        timeout=10.0,
+    )
+    windows = _usage_windows(
+        payload.get("usage") or {},
+        (("rolling", "Rolling window"), ("weekly", "Weekly"), ("monthly", "Monthly")),
+        "percent",
+        "resetsAt",
+    )
+    return _snapshot("opencode-go", "usage_api", windows, [])
+
+
 _USAGE_FETCHERS: dict[str, Callable[[Optional[str], Optional[str]], Optional[AccountUsageSnapshot]]] = {
     "openai-codex": _fetch_codex_account_usage, "anthropic": _fetch_anthropic_account_usage,
-    "openrouter": _fetch_openrouter_account_usage,
+    "openrouter": _fetch_openrouter_account_usage, "opencode-go": _fetch_opencode_go_account_usage,
 }
 
 

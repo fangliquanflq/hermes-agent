@@ -201,3 +201,61 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert snapshot.windows == ()
     assert "Credits balance: $74.50" in snapshot.details
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
+
+
+def test_fetch_account_usage_opencode_go_uses_fixed_usage_endpoint_and_runtime_credentials(monkeypatch):
+    resolved = []
+
+    def resolve(**kwargs):
+        resolved.append(kwargs)
+        return {
+            "provider": "opencode-go",
+            "base_url": "https://opencode.ai/zen/go",
+            "api_key": "pool-token",
+        }
+
+    requests = []
+
+    def get_json(url, headers, *, timeout):
+        requests.append((url, headers, timeout))
+        return {
+            "usage": {
+                "rolling": {"status": "ok", "percent": 3, "resetsAt": "2026-09-16T21:44:55.176Z"},
+                "weekly": {"status": "ok", "percent": 2, "resetsAt": "2026-09-21T00:00:00.176Z"},
+                "monthly": {"status": "ok", "percent": 2, "resetsAt": "2026-10-13T02:13:38.176Z"},
+            }
+        }
+
+    monkeypatch.setattr("agent.account_usage.resolve_runtime_provider", resolve)
+    monkeypatch.setattr("agent.account_usage._get_json", get_json)
+
+    snapshot = fetch_account_usage(
+        "opencode-go", base_url="https://opencode.ai/zen/go", api_key=None,
+    )
+
+    assert resolved == [{
+        "requested": "opencode-go",
+        "explicit_base_url": "https://opencode.ai/zen/go",
+        "explicit_api_key": None,
+    }]
+    assert requests == [(
+        "https://opencode.ai/zen/go/v1/usage",
+        {"Authorization": "Bearer pool-token", "Accept": "application/json"},
+        10.0,
+    )]
+    assert snapshot is not None
+    assert snapshot.provider == "opencode-go"
+    assert snapshot.windows == (
+        AccountUsageWindow(
+            label="Rolling window", used_percent=3.0,
+            reset_at=datetime(2026, 9, 16, 21, 44, 55, 176000, tzinfo=timezone.utc),
+        ),
+        AccountUsageWindow(
+            label="Weekly", used_percent=2.0,
+            reset_at=datetime(2026, 9, 21, 0, 0, 0, 176000, tzinfo=timezone.utc),
+        ),
+        AccountUsageWindow(
+            label="Monthly", used_percent=2.0,
+            reset_at=datetime(2026, 10, 13, 2, 13, 38, 176000, tzinfo=timezone.utc),
+        ),
+    )
