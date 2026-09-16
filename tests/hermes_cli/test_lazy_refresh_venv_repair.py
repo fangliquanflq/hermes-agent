@@ -267,6 +267,53 @@ def test_cmd_update_captures_and_propagates_pre_rebuild_snapshot(
     ]
 
 
+def test_current_checkout_runtime_repair_restores_snapshots_when_core_is_healthy(
+    monkeypatch,
+):
+    """A successful runtime swap must not discard optional backends from a healthy venv."""
+    from hermes_cli import managed_uv
+
+    repair = managed_uv.RuntimeRepairResult("repaired")
+    install_env = {"VIRTUAL_ENV": "candidate"}
+    refresh = MagicMock(return_value=True)
+    restore = MagicMock()
+
+    def fake_update_managed_uv(*, repair_observer):
+        repair_observer(repair)
+        return "uv"
+
+    monkeypatch.setattr(managed_uv, "update_managed_uv", fake_update_managed_uv)
+    monkeypatch.setattr(managed_uv, "ensure_uv", lambda **_kwargs: "uv")
+    monkeypatch.setattr(update_cmd, "_venv_core_imports_healthy", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        update_cmd, "_pip_install_prefix", lambda uv_bin: ([uv_bin, "pip"], install_env)
+    )
+    monkeypatch.setattr(
+        update_cmd, "_repair_node_deps_on_current_checkout", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(m, "_refresh_active_lazy_features", refresh)
+    monkeypatch.setattr(m, "_restore_active_tool_dependencies", restore)
+    monkeypatch.setattr(m, "_is_windows", lambda: True)
+
+    assert update_cmd._repair_current_checkout(
+        assume_yes=True,
+        gateway_mode=False,
+        pre_update_snapshot_id=None,
+        had_desktop_app_before_update=False,
+        active_lazy_features=["platform.telegram"],
+        active_tool_dependencies=["langfuse"],
+        upstream_checked=True,
+        _windows_gateway_resume=None,
+    ) is True
+
+    refresh.assert_called_once_with(
+        ["uv", "pip"], env=install_env, features=["platform.telegram"]
+    )
+    restore.assert_called_once_with(
+        ["langfuse"], ["uv", "pip"], env=install_env
+    )
+
+
 
 
 
