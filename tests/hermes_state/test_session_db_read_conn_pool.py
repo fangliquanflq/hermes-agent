@@ -673,3 +673,43 @@ def test_read_only_handles_do_not_count_toward_the_duplicate_writer_warning(db, 
     finally:
         for d in extra:
             d.close()
+
+
+@pytest.mark.requires_wal
+def test_closed_handles_do_not_count_toward_the_duplicate_writer_warning(db, caplog):
+    """Retaining closed objects must not make sequential one-shot writers look concurrent."""
+    import logging
+
+    from hermes_state import SessionDB
+    from hermes_state_readpool import _HANDLES_PER_PATH_WARN
+
+    closed = []
+    with caplog.at_level(logging.WARNING, logger="hermes_state"):
+        for _ in range(_HANDLES_PER_PATH_WARN + 1):
+            handle = SessionDB(db_path=db.db_path)
+            handle.close()
+            closed.append(handle)
+
+    assert all(handle._conn is None for handle in closed)
+    assert not any(
+        "live SessionDB handles on" in record.getMessage() for record in caplog.records
+    ), "closed handles were counted as live writers"
+
+
+def test_failed_initialization_does_not_register_with_read_budget(tmp_path, monkeypatch):
+    """Only handles that finish opening participate in path-level bookkeeping."""
+    from hermes_state import SessionDB
+    from hermes_state_readpool import _PathReadBudget
+
+    registered = []
+    monkeypatch.setattr(_PathReadBudget, "register", lambda self, handle: registered.append(handle))
+    monkeypatch.setattr(
+        SessionDB,
+        "_open_writer",
+        lambda self: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        SessionDB(db_path=tmp_path / "state.db")
+
+    assert registered == []
