@@ -93,7 +93,8 @@ def _end_position(text: str) -> Dict[str, int]:
     # splitlines drops a trailing newline: the end is then the start of the next (empty) line.
     if text.endswith(("\n", "\r")):
         return {"line": len(lines), "character": 0}
-    return {"line": len(lines) - 1, "character": len(lines[-1])}
+    character = len(lines[-1].encode("utf-16-le")) // 2
+    return {"line": len(lines) - 1, "character": character}
 
 
 @dataclass

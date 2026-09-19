@@ -33,6 +33,8 @@ Behaviour (all behaviours selectable via env var ``MOCK_LSP_SCRIPT``):
   process and stdin alive.
 - ``"malformed_frame"`` — writes an invalid frame after ``didOpen``,
   then keeps the process and stdin alive.
+- ``"incremental_mirror"`` — applies incremental changes using UTF-16
+  positions and returns the resulting document through hover.
 
 The script writes JSON-RPC framed messages to stdout and reads from
 stdin.  No third-party dependencies — uses only stdlib so it runs
@@ -70,8 +72,19 @@ def write_message(obj):
     sys.stdout.buffer.flush()
 
 
+def utf16_index(text, offset):
+    """Convert an LSP UTF-16 offset to a Python string index."""
+    units = 0
+    for index, char in enumerate(text):
+        if units >= offset:
+            return index
+        units += 2 if ord(char) > 0xFFFF else 1
+    return len(text)
+
+
 def main():
     script = os.environ.get("MOCK_LSP_SCRIPT", "clean")
+    documents = {}
 
     while True:
         msg = read_message()
@@ -87,7 +100,7 @@ def main():
                     "id": msg["id"],
                     "result": {
                         "capabilities": {
-                            "textDocumentSync": 1,  # Full
+                            "textDocumentSync": 2 if script == "incremental_mirror" else 1,
                             "diagnosticProvider": {"interFileDependencies": False, "workspaceDiagnostics": False},
                         },
                         "serverInfo": {"name": "mock-lsp", "version": "0.1"},
@@ -121,6 +134,15 @@ def main():
             uri = td.get("uri", "")
             version = td.get("version", 0)
             is_change = msg.get("method") == "textDocument/didChange"
+            if script == "incremental_mirror":
+                if not is_change:
+                    documents[uri] = td.get("text", "")
+                else:
+                    change = (params.get("contentChanges") or [{}])[0]
+                    old_text = documents.get(uri, "")
+                    end = (change.get("range") or {}).get("end") or {}
+                    end_index = utf16_index(old_text, end.get("character", 0))
+                    documents[uri] = change.get("text", "") + old_text[end_index:]
             if not is_change and script in {"clean_eof", "malformed_frame"}:
                 if script == "malformed_frame":
                     sys.stdout.buffer.write(b"Content-Length: invalid\r\n\r\n")
@@ -177,6 +199,11 @@ def main():
             if script == "versionless":
                 del params["version"]
             write_message({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": params})
+            continue
+
+        if msg.get("method") == "textDocument/hover" and script == "incremental_mirror":
+            uri = (msg.get("params") or {}).get("textDocument", {}).get("uri", "")
+            write_message({"jsonrpc": "2.0", "id": msg["id"], "result": {"contents": documents.get(uri, "")}})
             continue
 
         if msg.get("method") == "textDocument/diagnostic":

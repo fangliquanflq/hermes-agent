@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.lsp.client import LSPClient
+from agent.lsp.client import LSPClient, file_uri
 from agent.lsp.protocol import LSPProtocolError
 
 
@@ -69,6 +69,28 @@ async def test_client_receives_published_errors(tmp_path: Path):
         assert d["code"] == "MOCK001"
         assert d["source"] == "mock-lsp"
         assert "synthetic error" in d["message"]
+    finally:
+        await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_incremental_replacement_uses_utf16_endpoint(tmp_path: Path):
+    f = tmp_path / "x.js"
+    f.write_text('const face = "😀";', encoding="utf-8")
+
+    client = _client(tmp_path, "incremental_mirror")
+    await client.start()
+    try:
+        await client.open_file(str(f), language_id="javascript")
+        replacement = 'const next = "🚀";'
+        f.write_text(replacement, encoding="utf-8")
+        await client.open_file(str(f), language_id="javascript")
+
+        result = await client._send_request(
+            "textDocument/hover",
+            {"textDocument": {"uri": file_uri(str(f))}, "position": {"line": 0, "character": 0}},
+        )
+        assert result["contents"] == replacement
     finally:
         await client.shutdown()
 
